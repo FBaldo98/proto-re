@@ -9,7 +9,8 @@
 // x87 return value) back into the Ctx and resumes on the host stack.
 //
 // Per-thread bridge state is reached through fs:[0x14] (TIB ArbitraryUserPointer), usable from assembly without
-// clobbering registers.
+// clobbering registers. The engine runs game flow in fibers that yield from deep inside recompiled code, so the
+// state (and its host stack) is really per fiber: SwitchToFiber is wrapped to swap fs:[0x14] along with the fiber.
 #include <windows.h>
 
 #include <cstdint>
@@ -465,6 +466,42 @@ extern "C" void RecompUnimplemented(Ctx* ctx, uint32_t va, const char* what) {
     TerminateProcess(GetCurrentProcess(), 0x7e);
 }
 
+namespace {
+
+// Engine IAT slot of kernel32!SwitchToFiber, called through by the engine's fiber yield.
+constexpr uint32_t kSwitchToFiberIat = 0x11331c58u;
+
+using SwitchToFiberFn = VOID(WINAPI*)(LPVOID);
+SwitchToFiberFn g_switch_to_fiber = nullptr;
+
+// Each fiber keeps its own Bridge: the outgoing one stays in this frame on the outgoing fiber's stack and is put
+// back when that fiber is resumed here; a fiber running for the first time starts with none (allocated on entry).
+VOID WINAPI BridgeSwitchToFiber(LPVOID fiber) {
+    Bridge* mine;
+    asm volatile("movl %%fs:0x14, %0" : "=r"(mine));
+    asm volatile("movl %0, %%fs:0x14" : : "r"(0));
+    g_switch_to_fiber(fiber);
+    asm volatile("movl %0, %%fs:0x14" : : "r"(mine));
+}
+
+void InstallFiberBridge() {
+    static bool done = false;
+    if (done) {
+        return;
+    }
+    done = true;
+    auto* base = static_cast<uint8_t*>(protore::EngineAddress(0));
+    auto* slot = reinterpret_cast<uint32_t*>(base + (kSwitchToFiberIat - protore::kEngineImageBase));
+    DWORD old_protect;
+    VirtualProtect(slot, 4, PAGE_READWRITE, &old_protect);
+    g_switch_to_fiber = reinterpret_cast<SwitchToFiberFn>(*slot);
+    *slot = reinterpret_cast<uint32_t>(&BridgeSwitchToFiber);
+    VirtualProtect(slot, 4, old_protect, &old_protect);
+    protore::Log("recomp: SwitchToFiber wrapped (per-fiber bridge state)");
+}
+
+}  // namespace
+
 namespace protore {
 
 int InstallAllRecompEntries() {
@@ -513,6 +550,7 @@ void* RecompEntryStub(uint32_t va) {
     if (!fn) {
         return nullptr;
     }
+    InstallFiberBridge();
     static uint8_t* pool = nullptr;
     static size_t used = 0;
     if (!pool) {
