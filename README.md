@@ -87,6 +87,36 @@ wineboot -i && setup_dxvk install
 
 ## Сборка и запуск
 
+### Нативная версия (без Wine)
+
+Зависимости в `~/proto-re-data/deps`: DXVK 2.5.3 (собран с `-Denable_d3d9=true -Ddxvk_native_wsi=sdl2` в
+`build-native`), FAudio 25.10 (`build-native`); SDL2 из системы.
+
+```sh
+python3 -I tools/recomp/data_entries.py                                                 # точки входа вне Ghidra
+python3 -I tools/recomp/recomp.py --functions all --out build/recomp/all --split 400     # ~3 мин
+make -C src/native -j4                                   # первый раз ~11 мин, потом секунды
+cd ~/proto-re-data/native_run && PROTORE_WINDOWED=1 ~/proto-re/build/native/proto-native ~/proto-re-data/game
+```
+
+Лог пишется в `proto-native.log` в текущей папке.
+
+### Android
+
+```sh
+android/build-deps.sh arm64-v8a ~/proto-re-data/android-deps-src ~/proto-re-data/android-deps/arm64-v8a
+make -C src/native -j4 PLATFORM=android ABI=arm64-v8a     # build/android/arm64-v8a/libmain.so
+android/build-apk.sh arm64-v8a                           # build/apk/prototype.apk
+adb install -r build/apk/prototype.apk
+```
+
+Файлы игры (`prototypeenginef.dll`, все `.rcf`, `.p3d`, папки `art`, `audio`, `scripts`) копируются в
+`/sdcard/Android/data/com.protore.game/files/game/`. Лог: `adb logcat -s protore`.
+Зависимости (SDL2, FAudio, DXVK) также собираются на GitHub Actions (`android-deps`, артефакты на 30 дней);
+код игры и сгенерированный из неё код на GitHub не попадают.
+
+### Через Wine (прокси с хуками)
+
 Прокси с ручными хуками и прототипным набором перекомпилированных функций:
 
 ```sh
@@ -117,6 +147,10 @@ PROTORE_RECOMP=all wine prototypef.exe
 | `PROTORE_RECOMP_RANGE=lo-hi` | перекомпилированы только функции в диапазоне адресов (hex, hi не включается) |
 | `PROTORE_PROBE=openbykey\|watchdir` | диагностические пробы файловой системы |
 | `PROTORE_TRACE_FPU=1` | трассировка вызовов CRT, зависящих от состояния FPU |
+| `PROTORE_WINDOWED=1` | нативная версия: окно вместо полного экрана |
+| `PROTORE_SHOT=300,2000` | нативная версия: сохранить кадры с этими номерами в `shot_<кадр>.ppm` |
+| `PROTORE_INPUT=2100:Return,...` | нативная версия: нажать клавишу (имя SDL) на заданном кадре |
+| `PROTORE_TRACE_FILES=1` | нативная версия: писать в лог каждое открытие файла |
 
 Поиск функции, ломающей игру:
 `MIN_FRAMES=64 RUN_SECONDS=70 [START_LO=N] tools/recomp/bisect.sh`.

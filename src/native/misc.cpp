@@ -1,4 +1,4 @@
-// Smaller imports of the native host: WINMM timers, XInput (no pad yet), SHELL32/SHLWAPI paths, COM and network
+// Smaller imports of the native host: WINMM timers, SHELL32/SHLWAPI paths, COM and network
 // stubs (online features are not ported).
 #include <sys/stat.h>
 
@@ -39,10 +39,6 @@ F(waveOutPrepareHeader) { Return(c, 0, 3); }
 F(waveOutUnprepareHeader) { Return(c, 0, 3); }
 F(waveOutReset) { Return(c, 0, 1); }
 
-// XInput 1.3 by ordinal: #2 XInputGetState(index, state), #3 XInputSetState, #4 XInputGetCapabilities
-F(XInputGetState) { Return(c, 1167, 2); }  // ERROR_DEVICE_NOT_CONNECTED
-F(XInputSetState) { Return(c, 1167, 2); }
-F(XInputGetCapabilities) { Return(c, 1167, 3); }
 
 // SHELL32 / SHLWAPI
 F(SHGetFolderPathA) {
@@ -140,10 +136,6 @@ const ImportDef kMisc[] = {
     E("winmm.dll", waveOutGetNumDevs), E("winmm.dll", waveOutGetDevCapsA), E("winmm.dll", waveOutOpen),
     E("winmm.dll", waveOutClose), E("winmm.dll", waveOutWrite), E("winmm.dll", waveOutPrepareHeader),
     E("winmm.dll", waveOutUnprepareHeader), E("winmm.dll", waveOutReset),
-    {"xinput1_3.dll", "#2", x_XInputGetState}, {"xinput1_3.dll", "#3", x_XInputSetState},
-    {"xinput1_3.dll", "#4", x_XInputGetCapabilities}, {"xinput1_3.dll", "XInputGetState", x_XInputGetState},
-    {"xinput1_3.dll", "XInputSetState", x_XInputSetState},
-    {"xinput1_3.dll", "XInputGetCapabilities", x_XInputGetCapabilities},
     E("shell32.dll", SHGetFolderPathA), E("shlwapi.dll", PathRelativePathToA),
     E("ole32.dll", CoInitialize), E("ole32.dll", CoUninitialize), E("ole32.dll", CoCreateInstance),
     E("ole32.dll", CoCreateGuid), E("ole32.dll", CLSIDFromString), E("ole32.dll", CoSetProxyBlanket),
