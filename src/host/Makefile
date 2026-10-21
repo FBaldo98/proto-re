@@ -1,6 +1,6 @@
 # Builds the hook host as a 32-bit Windows binkw32.dll proxy.
 CXX := i686-w64-mingw32-g++
-CXXFLAGS := -std=c++17 -O2 -Wall -Wextra -fno-exceptions -fno-rtti
+CXXFLAGS := -std=c++17 -O2 -Wall -Wextra -fno-exceptions -fno-rtti -falign-functions=16
 LDFLAGS := -shared -static -static-libgcc -static-libstdc++ -Wl,--enable-stdcall-fixup
 
 OUT := ../../build/host
@@ -12,12 +12,20 @@ CORE_SRCS := report.cpp name_hash.cpp cement_library.cpp cement_file_range.cpp m
 MATH_SRCS := vector_trace.cpp
 TEST_SRCS := tests.cpp report_capture.cpp report_test.cpp vector_trace_test.cpp name_hash_test.cpp cement_library_test.cpp cement_file_range_test.cpp cement_state_test.cpp memory_test.cpp cement_load_test.cpp cement_lifetime_test.cpp file_test.cpp
 
-OBJS := $(HOST_SRCS:%.cpp=$(OUT)/host/%.o) \
+# Generated parts: `recomp.py --split` output (part_NNNN.c + table.c). RECOMP_DIR selects the set: the 177-function
+# prototype (default) or the whole engine (../../build/recomp/all).
+CC := i686-w64-mingw32-gcc
+RECOMP_DIR ?= ../../build/recomp/gen
+RECOMP_CFLAGS := -std=c11 -O1 -msse2 -mfpmath=sse -fno-strict-aliasing -w -I../recomp
+RECOMP_GEN := $(wildcard $(RECOMP_DIR)/*.c)
+RECOMP_OBJ_DIR := $(OUT)/recomp_gen/$(notdir $(RECOMP_DIR))
+RECOMP_OBJS := $(RECOMP_GEN:$(RECOMP_DIR)/%.c=$(RECOMP_OBJ_DIR)/%.o)
+OBJS = $(HOST_SRCS:%.cpp=$(OUT)/host/%.o) \
         $(CORE_SRCS:%.cpp=$(OUT)/core/%.o) \
         $(MATH_SRCS:%.cpp=$(OUT)/math/%.o) \
         $(TEST_SRCS:%.cpp=$(OUT)/tests/%.o) \
         $(RECOMP_SRCS:%.cpp=$(OUT)/recomp/%.o) \
-        $(OUT)/recomp/recomp_gen.o
+        $(RECOMP_OBJS)
 
 HEADERS := $(wildcard *.h ../core/*.h ../math/*.h ../tests/*.h)
 
@@ -36,9 +44,7 @@ $(OUT)/host:
 
 # Statically recompiled engine code (tools/recomp/recomp.py). SSE math keeps the host x87 stack free for the
 # engine's float return values.
-CC := i686-w64-mingw32-gcc
-RECOMP_CFLAGS := -std=c11 -O2 -msse2 -mfpmath=sse -fno-strict-aliasing -Wno-unused-label -I../recomp
-$(OUT)/recomp/recomp_gen.o: ../../build/recomp/recomp_gen.c ../recomp/runtime.h ../recomp/runtime_fp.h
+$(RECOMP_OBJ_DIR)/%.o: $(RECOMP_DIR)/%.c ../recomp/runtime.h ../recomp/runtime_fp.h
 	@mkdir -p $(dir $@)
 	$(CC) $(RECOMP_CFLAGS) -c -o $@ $<
 

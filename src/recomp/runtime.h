@@ -13,22 +13,24 @@
 extern "C" {
 #endif
 
+typedef union XmmValue {
+    float f[4];
+    double d[2];
+    uint32_t u32[4];
+    uint64_t u64[2];
+} XmmValue;
+
 typedef struct Ctx {
     uint32_t eax, ecx, edx, ebx, esp, ebp, esi, edi;
-    uint8_t cf, zf, sf, of, pf, df;
-    uint8_t pad[2];
+    uint8_t cf, zf, sf, of, pf, df, af;
+    uint8_t pad;
     uint32_t ret_target;  /* guest return address popped by the last `ret`, used by the native bridge */
-    /* x87 stack (prototype precision: double), top index and status bits */
+    uint32_t fs_base;     /* guest address of the TEB (segment fs) */
+    /* x87: registers in double precision, hardware-style TOP, status (C0..C3) and control words */
     double st[8];
     uint32_t st_top;
     uint16_t fpu_sw, fpu_cw;
-    /* SSE registers */
-    union {
-        float f[4];
-        double d[2];
-        uint32_t u32[4];
-        uint64_t u64[2];
-    } xmm[8];
+    XmmValue xmm[8];
 } Ctx;
 
 extern uint8_t* RecompMemoryBase;
@@ -105,8 +107,52 @@ static inline uint32_t SubFlags(Ctx* c, uint32_t a, uint32_t b, uint32_t borrow,
     return r;
 }
 
-/* ---- host fallbacks provided by the embedding ---- */
+/* ---- 128-bit memory ---- */
+static inline XmmValue RecompLoad128(uint32_t a) { XmmValue v; memcpy(&v, G(a), 16); return v; }
+static inline void RecompStore128(uint32_t a, XmmValue v) { memcpy(G(a), &v, 16); }
+
+/* ---- EFLAGS ---- */
+static inline uint8_t RecompLahf(const Ctx* c) {
+    return (uint8_t)((c->sf << 7) | (c->zf << 6) | (c->af << 4) | (c->pf << 2) | 2u | c->cf);
+}
+static inline void RecompSahf(Ctx* c, uint8_t ah) {
+    c->sf = (ah >> 7) & 1; c->zf = (ah >> 6) & 1; c->af = (ah >> 4) & 1; c->pf = (ah >> 2) & 1; c->cf = ah & 1;
+}
+static inline uint32_t RecompEflags(const Ctx* c) {
+    return RecompLahf(c) | ((uint32_t)c->df << 10) | ((uint32_t)c->of << 11) | 0x200u;
+}
+static inline void RecompSetEflags(Ctx* c, uint32_t f) {
+    RecompSahf(c, (uint8_t)f);
+    c->df = (f >> 10) & 1;
+    c->of = (f >> 11) & 1;
+}
+
+/* ---- setjmp/longjmp (MSVCR80 _setjmp3/longjmp, used by the engine's Lua) ----
+ * The guest jmp_buf is never written: the generated code calls the host setjmp in the recompiled function's own
+ * frame on a slot keyed by the guest buffer address, and longjmp unwinds the host C frames back to it. */
+#include <setjmp.h>
+
+typedef struct RecompJmpSlot {
+    uint32_t guest_buf;
+    uint32_t esp, ebp, ebx, esi, edi, st_top;
+    uint16_t fpu_cw;
+    uint32_t value;
+    uint8_t bridge_state[32];  /* embedding-specific (host stack bookkeeping), restored on longjmp */
+    jmp_buf host;
+} RecompJmpSlot;
+
+/* Saves the guest callee-saved registers for `guest_buf` and returns the host jmp_buf to setjmp on. */
+jmp_buf* RecompSetjmpPrepare(Ctx* ctx, uint32_t guest_buf);
+/* Restores the guest registers after a longjmp landed on `guest_buf`; eax receives the value. */
+void RecompSetjmpResume(Ctx* ctx, uint32_t guest_buf);
+/* longjmp(guest_buf, value): does not return. */
+void RecompLongjmp(Ctx* ctx, uint32_t guest_buf, uint32_t value) __attribute__((noreturn));
+
+/* ---- host services provided by the embedding ---- */
 void RecompUnimplemented(Ctx* ctx, uint32_t va, const char* what);
+void RecompCpuid(Ctx* ctx);
+void RecompBridgeSave(uint8_t state[32]);
+void RecompBridgeRestore(const uint8_t state[32]);
 
 #ifdef __cplusplus
 }

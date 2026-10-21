@@ -9,6 +9,8 @@
 #include "probes.h"
 #include "registry.h"
 
+#include "../recomp/bridge.h"
+
 namespace {
 
 bool EngineBuildMatches() {
@@ -39,8 +41,15 @@ BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
         } else if (EngineBuildMatches()) {
             size_t count = 0;
             protore::Hook* hooks = protore::Registry(&count);
-            int installed = protore::InstallHooks(hooks, count);
-            protore::Log("%d of %u hooks installed", installed, static_cast<unsigned>(count));
+            char recomp_mode[8] = "";
+            GetEnvironmentVariableA("PROTORE_RECOMP", recomp_mode, sizeof(recomp_mode));
+            if (lstrcmpA(recomp_mode, "all") == 0) {
+                // Whole engine: every enterable function runs its recompiled version; no hand hooks.
+                protore::InstallAllRecompEntries();
+            } else {
+                int installed = protore::InstallHooks(hooks, count);
+                protore::Log("%d of %u hooks installed", installed, static_cast<unsigned>(count));
+            }
             if (GetEnvironmentVariableA("PROTORE_DIFFTEST", nullptr, 0) != 0) {
                 protore::InstallDiffTestTrigger();
             }

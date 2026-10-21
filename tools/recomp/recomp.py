@@ -28,6 +28,12 @@ REG32 = {"eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi"}
 REG16 = {"ax": "eax", "cx": "ecx", "dx": "edx", "bx": "ebx", "sp": "esp", "bp": "ebp", "si": "esi", "di": "edi"}
 REG8L = {"al": "eax", "cl": "ecx", "dl": "edx", "bl": "ebx"}
 REG8H = {"ah": "eax", "ch": "ecx", "dh": "edx", "bh": "ebx"}
+# User-mode selectors of 32-bit Windows; only ever read by the engine (stack/segment probes).
+# Calls with a special implementation in recompiled code (MSVCR80 setjmp/longjmp: thunk and IAT slot addresses).
+SETJMP_TARGETS = {0x10a88a30}
+SETJMP_IAT = {0x11331fc4}
+LONGJMP_IAT = {0x11331fbc}
+SEGMENT_SELECTORS = {"cs": 0x1b, "ds": 0x23, "es": 0x23, "ss": 0x23, "fs": 0x3b, "gs": 0x0}
 
 COND = {
     "o": "c->of", "no": "!c->of",
@@ -39,6 +45,45 @@ COND = {
     "l": "(c->sf != c->of)", "ge": "(c->sf == c->of)",
     "le": "(c->zf || c->sf != c->of)", "g": "(!c->zf && c->sf == c->of)",
 }
+
+
+SSE_MNEMONICS = {"cvttss2si", "cvtss2si", "cvttsd2si", "cvtsd2si"}
+
+
+FLAG_NAMES = ("CF", "ZF", "SF", "OF", "PF", "AF", "DF")
+ALL_FLAGS = (1 << len(FLAG_NAMES)) - 1
+
+
+def _mask(kinds):
+    m = {}
+    for bit, name in enumerate(FLAG_NAMES):
+        v = 0
+        for kind in kinds:
+            v |= getattr(X, f"X86_EFLAGS_{kind}_{name}", 0)
+        m[bit] = v
+    return m
+
+
+_DEF_BITS = _mask(("MODIFY", "RESET", "SET", "UNDEFINED"))
+_USE_BITS = _mask(("TEST", "PRIOR"))
+STATUS = 0b111111  # CF ZF SF OF PF AF
+
+# Instructions whose capstone flag metadata is missing or incomplete.
+MANUAL_DEFS = {"fcomi": STATUS, "fcomip": STATUS, "fucomi": STATUS, "fucomip": STATUS, "fcompi": STATUS,
+               "fucompi": STATUS, "comiss": STATUS, "ucomiss": STATUS, "comisd": STATUS, "ucomisd": STATUS,
+               "sahf": STATUS, "popfd": ALL_FLAGS, "cmpxchg8b": 0b10}
+MANUAL_USES = {"lahf": STATUS, "pushfd": ALL_FLAGS}
+
+
+def flag_sets(ins):
+    """(defs, uses) as bit sets over FLAG_NAMES."""
+    base = ins.mnemonic.split()[-1]
+    e = ins.eflags
+    defs = sum(1 << b for b, m in _DEF_BITS.items() if e & m)
+    uses = sum(1 << b for b, m in _USE_BITS.items() if e & m)
+    defs |= MANUAL_DEFS.get(base, 0)
+    uses |= MANUAL_USES.get(base, 0)
+    return defs, uses
 
 
 class Unsupported(Exception):
@@ -62,11 +107,12 @@ class FunctionCompiler:
         self.va = va
         self.size = size
         self.known = known_entries
+        self.pe = pe
         self.code = pe.get_data(va - BASE, size)
-        self.ins = list(md.disasm(self.code, va))
         self.out = []
         self.unsupported = collections.Counter()
-        self.table_reads = 0
+        self.table_targets = {}  # address of a computed jmp -> list of its table targets
+        self.ins = self.decode()
 
     # ---- operands ----
     def reg_get(self, name):
@@ -78,6 +124,8 @@ class FunctionCompiler:
             return f"(c->{REG8L[name]} & 0xffu)"
         if name in REG8H:
             return f"((c->{REG8H[name]} >> 8) & 0xffu)"
+        if name in SEGMENT_SELECTORS:
+            return f"0x{SEGMENT_SELECTORS[name]:x}u"
         raise Unsupported(f"register {name}")
 
     def reg_set(self, name, value):
@@ -96,9 +144,11 @@ class FunctionCompiler:
 
     def address(self, ins, op):
         m = op.mem
-        if m.segment != 0:
-            raise Unsupported(f"segment {ins.reg_name(m.segment)}")
         parts = []
+        if m.segment == X.X86_REG_FS:
+            parts.append("c->fs_base")
+        elif m.segment not in (0, X.X86_REG_DS, X.X86_REG_SS, X.X86_REG_ES, X.X86_REG_CS):
+            raise Unsupported(f"segment {ins.reg_name(m.segment)}")
         if m.base != 0:
             parts.append(self.reg_get(ins.reg_name(m.base)))
         if m.index != 0:
@@ -132,15 +182,75 @@ class FunctionCompiler:
             return f"{fn}({self.address(ins, op)}, ({cast})({value}));"
         raise Unsupported("write to non-lvalue")
 
+    # ---- decoding (recursive descent from the entry point) ----
+    def decode_one(self, addr):
+        off = addr - self.va
+        if off < 0 or off >= self.size:
+            return None
+        for i in self.md.disasm(self.code[off:off + 16], addr, count=1):
+            return i
+        return None
+
+    def jump_table(self, ins):
+        """Targets of `jmp dword ptr [reg*4 + table]`, read from the image while they stay inside the function."""
+        op = ins.operands[0]
+        if op.type != X.X86_OP_MEM or op.mem.base != 0 or op.mem.index == 0 or op.mem.scale != 4:
+            return None
+        table = op.mem.disp & 0xffffffff
+        targets = []
+        for k in range(1024):
+            try:
+                entry = int.from_bytes(self.pe.get_data(table - BASE + 4 * k, 4), "little")
+            except Exception:
+                break
+            if not self.inside(entry):
+                break
+            targets.append(entry)
+        return targets or None
+
+    def decode(self):
+        decoded = {}
+        work = [self.va]
+        self.traps = set()  # addresses where decoding failed or hit int3: reaching them is a trap
+        while work:
+            addr = work.pop()
+            while addr not in decoded and addr not in self.traps:
+                i = self.decode_one(addr)
+                if i is None or i.mnemonic == "int3":
+                    self.traps.add(addr)
+                    break
+                decoded[addr] = i
+                nxt = addr + i.size
+                m = i.mnemonic
+                if i.group(capstone.CS_GRP_JUMP):
+                    op = i.operands[0] if i.operands else None
+                    if op is not None and op.type == X.X86_OP_IMM:
+                        if self.inside(op.imm):
+                            work.append(op.imm)
+                    elif m == "jmp":
+                        table = self.jump_table(i)
+                        if table:
+                            self.table_targets[addr] = table
+                            work.extend(table)
+                    if m == "jmp":
+                        break
+                    addr = nxt
+                    continue
+                if i.group(capstone.CS_GRP_RET) or m in ("ret", "hlt", "ud2"):
+                    break
+                addr = nxt
+        return [decoded[a] for a in sorted(decoded)]
+
     # ---- control flow ----
     def targets(self):
         t = set()
-        lo, hi = self.va, self.va + self.size
         for i in self.ins:
             if i.group(capstone.CS_GRP_JUMP) and i.operands and i.operands[0].type == X.X86_OP_IMM:
                 d = i.operands[0].imm
-                if lo <= d < hi:
+                if self.inside(d):
                     t.add(d)
+        for table in self.table_targets.values():
+            t.update(table)
         return t
 
     def inside(self, d):
@@ -160,8 +270,10 @@ class FunctionCompiler:
         repne = X.X86_PREFIX_REPNE in ins.prefix
         base = m.split()[-1]
         bits = ops[0].size * 8 if ops else 32
+        if X.X86_PREFIX_LOCK in ins.prefix and base not in ("cmpxchg", "cmpxchg8b"):
+            return self.locked_or_plain(ins, base)
 
-        if base in ("nop", "int3"):
+        if base in ("nop", "int3", "prefetcht0", "prefetchnta", "wait", "emms"):
             return "/* " + m + " */" if base == "nop" else f'RecompUnimplemented(c, 0x{ins.address:08x}u, "int3"); return;'
         if base == "mov" or base == "movabs":
             return self.write(ins, ops[0], self.read(ins, ops[1], bits))
@@ -184,8 +296,13 @@ class FunctionCompiler:
             b = self.read(ins, ops[1], bits)
             if ops[1].type == X.X86_OP_IMM:
                 b = f"0x{ops[1].imm & Mask(bits):x}u"
-            fn = "AddFlags" if base in ("add", "adc") else "SubFlags"
             carry = "c->cf" if base in ("adc", "sbb") else "0"
+            if self.flags_dead(ins):
+                if base == "cmp":
+                    return "/* cmp: flags dead */"
+                sign = "+" if base in ("add", "adc") else "-"
+                return self.write(ins, ops[0], f"({a} {sign} {b} {sign} {carry})")
+            fn = "AddFlags" if base in ("add", "adc") else "SubFlags"
             expr = f"{fn}(c, {a}, {b}, {carry}, {bits})"
             if base == "cmp":
                 return f"(void){expr};"
@@ -196,10 +313,19 @@ class FunctionCompiler:
             b = self.read(ins, ops[1], bits)
             if ops[1].type == X.X86_OP_IMM:
                 b = f"0x{ops[1].imm & Mask(bits):x}u"
+            if self.flags_dead(ins):
+                if base == "test":
+                    return "/* test: flags dead */"
+                return self.write(ins, ops[0], f"({a} {op} {b})")
             s = f"{{ uint32_t r = ({a} {op} {b}) & 0x{Mask(bits):x}u; RECOMP_FLAGS_LOGIC(c, r, {bits});"
             if base != "test":
                 s += " " + self.write(ins, ops[0], "r")
             return s + " }"
+        if base in ("inc", "dec") and self.flags_dead(ins):
+            sign = "+" if base == "inc" else "-"
+            return self.write(ins, ops[0], f"({self.read(ins, ops[0], bits)} {sign} 1u)")
+        if base == "neg" and self.flags_dead(ins):
+            return self.write(ins, ops[0], f"(0u - {self.read(ins, ops[0], bits)})")
         if base in ("inc", "dec"):
             a = self.read(ins, ops[0], bits)
             fn = "AddFlags" if base == "inc" else "SubFlags"
@@ -210,6 +336,18 @@ class FunctionCompiler:
             return ("{ uint32_t r = " + f"SubFlags(c, 0u, {a}, 0, {bits}); " + self.write(ins, ops[0], "r") + " }")
         if base == "not":
             return self.write(ins, ops[0], f"~{self.read(ins, ops[0], bits)}")
+        if base in ("shl", "sal", "shr", "sar") and self.flags_dead(ins):
+            a = self.read(ins, ops[0], bits)
+            n = self.read(ins, ops[1], 8) if len(ops) > 1 else "1u"
+            if base in ("shl", "sal"):
+                expr = f"(uint32_t)((uint64_t)a << n)"
+            elif base == "shr":
+                expr = "a >> n"
+            else:
+                expr = (f"(uint32_t)(n >= {bits} ? ((int32_t)(a << {32 - bits}) >> 31) : "
+                        f"(((int32_t)(a << {32 - bits}) >> {32 - bits}) >> n))")
+            return ("{ uint32_t n = (" + n + f") & 31u; uint32_t a = {a} & 0x{Mask(bits):x}u; if (n) {{ "
+                    + self.write(ins, ops[0], expr) + " } }")
         if base in ("shl", "sal", "shr", "sar"):
             a = self.read(ins, ops[0], bits)
             n = self.read(ins, ops[1], 8) if len(ops) > 1 else "1u"
@@ -239,13 +377,23 @@ class FunctionCompiler:
                     f"if (n) {{ uint32_t r = {expr}; c->cf = {cf}; " + self.write(ins, ops[0], "r") + " } }")
         if base == "imul":
             if len(ops) == 1:
-                if bits != 32:
-                    raise Unsupported("imul r/m8/16")
+                if bits == 8:
+                    v = self.read(ins, ops[0])
+                    return ("{ int32_t p = (int32_t)(int8_t)c->eax * (int8_t)" + v + "; "
+                            "c->eax = (c->eax & 0xffff0000u) | ((uint32_t)p & 0xffffu); c->cf = c->of = p != (int8_t)p; }")
+                if bits == 16:
+                    v = self.read(ins, ops[0])
+                    return ("{ int32_t p = (int32_t)(int16_t)c->eax * (int16_t)" + v + "; "
+                            "c->eax = (c->eax & 0xffff0000u) | ((uint32_t)p & 0xffffu); "
+                            "c->edx = (c->edx & 0xffff0000u) | (((uint32_t)p >> 16) & 0xffffu); c->cf = c->of = p != (int16_t)p; }")
                 v = self.read(ins, ops[0])
                 return ("{ int64_t p = (int64_t)(int32_t)c->eax * (int32_t)" + v + "; c->eax = (uint32_t)p; "
                         "c->edx = (uint32_t)((uint64_t)p >> 32); c->cf = c->of = p != (int64_t)(int32_t)p; }")
             a = self.read(ins, ops[1 if len(ops) == 3 else 0])
             b = f"0x{ops[2].imm & 0xffffffff:x}u" if len(ops) == 3 else self.read(ins, ops[1])
+            if bits == 16:
+                return ("{ int32_t p = (int32_t)(int16_t)" + a + " * (int16_t)" + b + "; uint32_t r = (uint32_t)p & 0xffffu; "
+                        "c->cf = c->of = p != (int16_t)p; " + self.write(ins, ops[0], "r") + " }")
             return ("{ int64_t p = (int64_t)(int32_t)" + a + " * (int32_t)" + b + "; uint32_t r = (uint32_t)p; "
                     "c->cf = c->of = p != (int64_t)(int32_t)r; " + self.write(ins, ops[0], "r") + " }")
         if base == "mul":
@@ -280,13 +428,20 @@ class FunctionCompiler:
             if ops[0].type == X.X86_OP_IMM:
                 return self.jump_to(ops[0].imm)
             target = self.read(ins, ops[0])
-            # Jump table or computed jump: switch over every instruction address of this function, otherwise
-            # treat it as a tail call.
-            cases = " ".join(f"case 0x{i.address:08x}u: goto L_{i.address:08x};" for i in self.ins)
-            self.table_reads += 1
-            self.computed_targets = True
-            return (f"{{ uint32_t t = {target}; switch (t) {{ {cases} default: RecompDispatch(c, t); return; }} }}")
+            table = self.table_targets.get(ins.address)
+            if table:
+                cases = " ".join(f"case 0x{d:08x}u: goto L_{d:08x};" for d in sorted(set(table)))
+                return f"{{ uint32_t t = {target}; switch (t) {{ {cases} default: RecompDispatch(c, t); return; }} }}"
+            # Computed jump without a recognised table: a tail call through the pointer.
+            return f"{{ uint32_t t = {target}; RecompDispatch(c, t); return; }}"
         if base == "call":
+            op = ops[0]
+            is_iat = op.type == X.X86_OP_MEM and op.mem.base == 0 and op.mem.index == 0
+            if (op.type == X.X86_OP_IMM and op.imm in SETJMP_TARGETS) or (is_iat and (op.mem.disp & 0xffffffff) in SETJMP_IAT):
+                return ("{ uint32_t jb = R32(c->esp); if (setjmp(*RecompSetjmpPrepare(c, jb)) == 0) { c->eax = 0; } "
+                        "else { RecompSetjmpResume(c, R32(c->esp)); } }")
+            if is_iat and (op.mem.disp & 0xffffffff) in LONGJMP_IAT:
+                return "RecompLongjmp(c, R32(c->esp), R32(c->esp + 4u));"
             if ops[0].type == X.X86_OP_IMM:
                 return f"Push32(c, 0x{nxt:08x}u); RecompDispatch(c, 0x{ops[0].imm & 0xffffffff:08x}u);"
             return f"{{ uint32_t t = {self.read(ins, ops[0])}; Push32(c, 0x{nxt:08x}u); RecompDispatch(c, t); }}"
@@ -334,137 +489,465 @@ class FunctionCompiler:
             return "c->df = 0;"
         if base == "std":
             return "c->df = 1;"
-        # ---- SSE scalar float ----
-        if base in ("movss", "movd") and ops_are_xmm(ins):
-            return self.sse_move(ins, base)
-        if base in ("addss", "subss", "mulss", "divss", "minss", "maxss", "sqrtss"):
-            return self.sse_arith(ins, base)
-        if base in ("cvtsi2ss", "cvttss2si", "cvtss2sd", "cvtsd2ss", "comiss", "ucomiss", "xorps", "andps"):
-            return self.sse_misc(ins, base)
-        # ---- x87 (prototype subset) ----
-        if base in ("fld", "fstp", "fst", "fild", "fistp", "fldz", "fld1", "fxch", "fchs", "fabs", "faddp", "fadd",
-                    "fsubp", "fsub", "fmulp", "fmul", "fdivp", "fdiv"):
+        # ---- SSE ----
+        if ops_are_xmm(ins) or base in SSE_MNEMONICS:
+            return self.sse(ins, base)
+        # ---- x87 ----
+        if base.startswith("f") or base in ("lahf", "sahf"):
             return self.x87(ins, base)
+        # ---- remaining integer instructions ----
+        if base in ("shld", "shrd"):
+            a = self.read(ins, ops[0])
+            b = self.read(ins, ops[1])
+            n = self.read(ins, ops[2], 8)
+            if base == "shld":
+                expr = "(uint32_t)((((uint64_t)a << 32) | b) << n >> 32)"
+                cf = "(a >> (32 - n)) & 1u"
+            else:
+                expr = "(uint32_t)((((uint64_t)b << 32) | a) >> n)"
+                cf = "(a >> (n - 1)) & 1u"
+            return ("{ uint32_t a = " + a + ", b = " + b + ", n = (" + n + ") & 31u; if (n) { uint32_t r = " + expr
+                    + "; c->cf = " + cf + "; c->zf = r == 0; c->sf = r >> 31; c->pf = Parity(r); "
+                    + self.write(ins, ops[0], "r") + " } }")
+        if base in ("rcr", "rcl"):
+            a = self.read(ins, ops[0], bits)
+            n = self.read(ins, ops[1], 8) if len(ops) > 1 else "1u"
+            step = ("{ uint32_t out = v & 1u; v = (v >> 1) | ((uint32_t)c->cf << " + str(bits - 1) + "); c->cf = out; }"
+                    if base == "rcr" else
+                    "{ uint32_t out = (v >> " + str(bits - 1) + ") & 1u; v = ((v << 1) | c->cf) & 0x" + f"{Mask(bits):x}" + "u; c->cf = out; }")
+            return ("{ uint32_t v = " + a + " & 0x" + f"{Mask(bits):x}" + "u; uint32_t n = (" + n + ") & 31u; "
+                    "while (n--) " + step + " " + self.write(ins, ops[0], "v") + " }")
+        if base in ("bsr", "bsf"):
+            v = self.read(ins, ops[1])
+            fn = "31u - (uint32_t)__builtin_clz(v)" if base == "bsr" else "(uint32_t)__builtin_ctz(v)"
+            return "{ uint32_t v = " + v + "; c->zf = v == 0; if (v) { " + self.write(ins, ops[0], fn) + " } }"
+        if base in ("bt", "bts", "btr", "btc"):
+            if ops[0].type == X.X86_OP_MEM and ops[1].type == X.X86_OP_REG:
+                raise Unsupported(f"{base} memory with register offset")
+            v = self.read(ins, ops[0], bits)
+            n = self.read(ins, ops[1], bits)
+            s = "{ uint32_t v = " + v + "; uint32_t n = (" + n + ") & " + str(bits - 1) + "u; c->cf = (v >> n) & 1u; "
+            if base != "bt":
+                op = {"bts": "v | (1u << n)", "btr": "v & ~(1u << n)", "btc": "v ^ (1u << n)"}[base]
+                s += self.write(ins, ops[0], op) + " "
+            return s + "}"
+        if base == "xadd":
+            return self.locked_or_plain(ins, "xadd")
+        if base == "cmpxchg8b":
+            a = self.address(ins, ops[0])
+            return ("{ uint64_t expected = ((uint64_t)c->edx << 32) | c->eax; uint64_t desired = ((uint64_t)c->ecx << 32) | c->ebx; "
+                    "uint64_t old = __sync_val_compare_and_swap((uint64_t*)G(" + a + "), expected, desired); "
+                    "c->zf = old == expected; if (!c->zf) { c->eax = (uint32_t)old; c->edx = (uint32_t)(old >> 32); } }")
+        if base == "pushfd":
+            return "Push32(c, RecompEflags(c));"
+        if base == "popfd":
+            return "RecompSetEflags(c, Pop32(c));"
+        if base == "cpuid":
+            return "RecompCpuid(c);"
+        if base == "in":
+            return f'RecompUnimplemented(c, 0x{ins.address:08x}u, "port input"); return;'
+        if base == "cwde":
+            return "c->eax = (uint32_t)(int32_t)(int16_t)c->eax;"
+        if base == "cbw":
+            return "c->eax = (c->eax & 0xffff0000u) | (uint16_t)(int16_t)(int8_t)c->eax;"
+        if base == "cwd":
+            return "c->edx = (c->edx & 0xffff0000u) | ((c->eax & 0x8000u) ? 0xffffu : 0u);"
+        if base == "sahf":
+            return self.x87(ins, base)
+        if base == "bswap":
+            return self.write(ins, ops[0], f"__builtin_bswap32({self.read(ins, ops[0])})")
         raise Unsupported(m)
 
-    # ---- SSE helpers ----
+    def locked_or_plain(self, ins, base):
+        """Read-modify-write with a lock prefix (atomic on the host) or without it."""
+        ops = ins.operands
+        bits = ops[0].size * 8
+        if bits != 32 or ops[0].type != X.X86_OP_MEM:
+            if base == "xadd" and ops[0].type == X.X86_OP_REG:
+                a, b = self.read(ins, ops[0]), self.read(ins, ops[1])
+                return ("{ uint32_t a = " + a + ", b = " + b + "; uint32_t r = AddFlags(c, a, b, 0, 32); "
+                        + self.write(ins, ops[1], "a") + " " + self.write(ins, ops[0], "r") + " }")
+            raise Unsupported(f"lock {base} {bits}-bit")
+        p = f"(uint32_t*)G({self.address(ins, ops[0])})"
+        if base == "xadd":
+            src = self.read(ins, ops[1])
+            return ("{ uint32_t b = " + src + "; uint32_t old = __sync_fetch_and_add(" + p + ", b); "
+                    "(void)AddFlags(c, old, b, 0, 32); " + self.write(ins, ops[1], "old") + " }")
+        if base in ("inc", "dec"):
+            fn = "__sync_fetch_and_add" if base == "inc" else "__sync_fetch_and_sub"
+            flags = "AddFlags" if base == "inc" else "SubFlags"
+            return ("{ uint8_t cf = c->cf; uint32_t old = " + fn + "(" + p + ", 1u); (void)" + flags
+                    + "(c, old, 1u, 0, 32); c->cf = cf; }")
+        if base in ("add", "sub"):
+            v = self.read(ins, ops[1], 32)
+            fn = "__sync_fetch_and_add" if base == "add" else "__sync_fetch_and_sub"
+            flags = "AddFlags" if base == "add" else "SubFlags"
+            return "{ uint32_t b = " + v + "; uint32_t old = " + fn + "(" + p + ", b); (void)" + flags + "(c, old, b, 0, 32); }"
+        if base in ("or", "and", "xor"):
+            v = self.read(ins, ops[1], 32)
+            fn = {"or": "__sync_fetch_and_or", "and": "__sync_fetch_and_and", "xor": "__sync_fetch_and_xor"}[base]
+            op = {"or": "|", "and": "&", "xor": "^"}[base]
+            return ("{ uint32_t b = " + v + "; uint32_t old = " + fn + "(" + p + ", b); uint32_t r = old " + op
+                    + " b; RECOMP_FLAGS_LOGIC(c, r, 32); }")
+        if base == "xchg":
+            v = self.read(ins, ops[1], 32)
+            return "{ uint32_t old = __sync_lock_test_and_set(" + p + ", " + v + "); " + self.write(ins, ops[1], "old") + " }"
+        raise Unsupported(f"lock {base}")
+
+    # ---- SSE ----
     def xmm(self, ins, op):
         name = ins.reg_name(op.reg)
         if not name.startswith("xmm"):
             raise Unsupported(f"register {name}")
         return f"c->xmm[{int(name[3:])}]"
 
-    def sse_move(self, ins, base):
-        d, s = ins.operands
-        if base == "movss":
-            if d.type == X.X86_OP_REG and s.type == X.X86_OP_MEM:
-                return f"{{ {self.xmm(ins, d)}.f[0] = RF32({self.address(ins, s)}); {self.xmm(ins, d)}.u32[1] = {self.xmm(ins, d)}.u32[2] = {self.xmm(ins, d)}.u32[3] = 0; }}"
-            if d.type == X.X86_OP_MEM:
-                return f"WF32({self.address(ins, d)}, {self.xmm(ins, s)}.f[0]);"
-            return f"{self.xmm(ins, d)}.f[0] = {self.xmm(ins, s)}.f[0];"
-        # movd
-        if d.type == X.X86_OP_REG and ins.reg_name(d.reg).startswith("xmm"):
-            v = self.read(ins, s, 32)
-            return f"{{ {self.xmm(ins, d)}.u64[0] = {v}; {self.xmm(ins, d)}.u64[1] = 0; }}"
-        return self.write(ins, d, f"{self.xmm(ins, s)}.u32[0]", 32)
+    def is_xmm(self, ins, op):
+        return op.type == X.X86_OP_REG and ins.reg_name(op.reg).startswith("xmm")
 
-    def sse_src_f32(self, ins, op):
+    def v128(self, ins, op):
+        """128-bit source as an XmmValue expression."""
+        if self.is_xmm(ins, op):
+            return self.xmm(ins, op)
+        if op.type == X.X86_OP_MEM:
+            return f"RecompLoad128({self.address(ins, op)})"
+        raise Unsupported("128-bit source")
+
+    def f32(self, ins, op):
         if op.type == X.X86_OP_MEM:
             return f"RF32({self.address(ins, op)})"
         return f"{self.xmm(ins, op)}.f[0]"
 
-    def sse_arith(self, ins, base):
-        d, s = ins.operands
-        dst = f"{self.xmm(ins, d)}.f[0]"
-        src = self.sse_src_f32(ins, s)
-        op = {"addss": "+", "subss": "-", "mulss": "*", "divss": "/"}.get(base)
-        if op:
-            return f"{dst} = {dst} {op} {src};"
-        if base == "minss":
-            return f"{dst} = ({dst} < {src}) ? {dst} : {src};"
-        if base == "maxss":
-            return f"{dst} = ({dst} > {src}) ? {dst} : {src};"
-        return f"{dst} = sqrtf({src});"
+    def f64(self, ins, op):
+        if op.type == X.X86_OP_MEM:
+            return f"RF64({self.address(ins, op)})"
+        return f"{self.xmm(ins, op)}.d[0]"
 
-    def sse_misc(self, ins, base):
-        d, s = ins.operands
+    def sse(self, ins, base):
+        ops = ins.operands
+        d = ops[0]
+        s = ops[1] if len(ops) > 1 else None
+        # ---- moves ----
+        if base in ("movaps", "movups", "movdqa", "movdqu", "movapd", "movupd"):
+            if d.type == X.X86_OP_MEM:
+                return f"RecompStore128({self.address(ins, d)}, {self.xmm(ins, s)});"
+            return f"{self.xmm(ins, d)} = {self.v128(ins, s)};"
+        if base == "movss":
+            if self.is_xmm(ins, d) and s.type == X.X86_OP_MEM:
+                return f"{{ XmmValue* x = &{self.xmm(ins, d)}; x->f[0] = RF32({self.address(ins, s)}); x->u32[1] = x->u32[2] = x->u32[3] = 0; }}"
+            if d.type == X.X86_OP_MEM:
+                return f"WF32({self.address(ins, d)}, {self.xmm(ins, s)}.f[0]);"
+            return f"{self.xmm(ins, d)}.f[0] = {self.xmm(ins, s)}.f[0];"
+        if base == "movsd":  # SSE2 scalar double (the string form never has xmm operands)
+            if self.is_xmm(ins, d) and s.type == X.X86_OP_MEM:
+                return f"{{ XmmValue* x = &{self.xmm(ins, d)}; x->d[0] = RF64({self.address(ins, s)}); x->u64[1] = 0; }}"
+            if d.type == X.X86_OP_MEM:
+                return f"WF64({self.address(ins, d)}, {self.xmm(ins, s)}.d[0]);"
+            return f"{self.xmm(ins, d)}.d[0] = {self.xmm(ins, s)}.d[0];"
+        if base in ("movd", "movq"):
+            if self.is_xmm(ins, d):
+                if s.type == X.X86_OP_MEM:
+                    v = f"R64({self.address(ins, s)})" if base == "movq" else f"R32({self.address(ins, s)})"
+                elif self.is_xmm(ins, s):
+                    v = f"{self.xmm(ins, s)}.u64[0]"
+                else:
+                    v = self.read(ins, s, 32)
+                return f"{{ XmmValue* x = &{self.xmm(ins, d)}; x->u64[0] = {v}; x->u64[1] = 0; }}"
+            if d.type == X.X86_OP_MEM:
+                if base == "movq":
+                    return f"W64({self.address(ins, d)}, {self.xmm(ins, s)}.u64[0]);"
+                return f"W32({self.address(ins, d)}, {self.xmm(ins, s)}.u32[0]);"
+            return self.write(ins, d, f"{self.xmm(ins, s)}.u32[0]", 32)
+        if base in ("movlps", "movhps", "movlpd", "movhpd"):
+            lane = 0 if base in ("movlps", "movlpd") else 1
+            if d.type == X.X86_OP_MEM:
+                return f"W64({self.address(ins, d)}, {self.xmm(ins, s)}.u64[{lane}]);"
+            return f"{self.xmm(ins, d)}.u64[{lane}] = R64({self.address(ins, s)});"
+        if base == "movhlps":
+            return f"{self.xmm(ins, d)}.u64[0] = {self.xmm(ins, s)}.u64[1];"
+        if base == "movlhps":
+            return f"{self.xmm(ins, d)}.u64[1] = {self.xmm(ins, s)}.u64[0];"
+        if base == "movmskps":
+            x = self.xmm(ins, s)
+            return self.write(ins, d, f"(({x}.u32[0] >> 31) | (({x}.u32[1] >> 31) << 1) | (({x}.u32[2] >> 31) << 2) | (({x}.u32[3] >> 31) << 3))", 32)
+        # ---- packed float arithmetic ----
+        packed = {"addps": "+", "subps": "-", "mulps": "*", "divps": "/"}
+        if base in packed:
+            return (f"{{ XmmValue b = {self.v128(ins, s)}; XmmValue* a = &{self.xmm(ins, d)}; for (int k = 0; k < 4; ++k) "
+                    f"a->f[k] = a->f[k] {packed[base]} b.f[k]; }}")
+        if base in ("minps", "maxps"):
+            cmp = "<" if base == "minps" else ">"
+            return (f"{{ XmmValue b = {self.v128(ins, s)}; XmmValue* a = &{self.xmm(ins, d)}; for (int k = 0; k < 4; ++k) "
+                    f"a->f[k] = (a->f[k] {cmp} b.f[k]) ? a->f[k] : b.f[k]; }}")
+        if base == "sqrtps":
+            return (f"{{ XmmValue b = {self.v128(ins, s)}; XmmValue* a = &{self.xmm(ins, d)}; for (int k = 0; k < 4; ++k) "
+                    f"a->f[k] = sqrtf(b.f[k]); }}")
+        scalar = {"addss": "+", "subss": "-", "mulss": "*", "divss": "/"}
+        if base in scalar:
+            dst = f"{self.xmm(ins, d)}.f[0]"
+            return f"{dst} = {dst} {scalar[base]} {self.f32(ins, s)};"
+        scalar_d = {"addsd": "+", "subsd": "-", "mulsd": "*", "divsd": "/"}
+        if base in scalar_d:
+            dst = f"{self.xmm(ins, d)}.d[0]"
+            return f"{dst} = {dst} {scalar_d[base]} {self.f64(ins, s)};"
+        if base in ("minss", "maxss"):
+            dst = f"{self.xmm(ins, d)}.f[0]"
+            cmp = "<" if base == "minss" else ">"
+            return f"{{ float b = {self.f32(ins, s)}; {dst} = ({dst} {cmp} b) ? {dst} : b; }}"
+        if base == "sqrtss":
+            return f"{self.xmm(ins, d)}.f[0] = sqrtf({self.f32(ins, s)});"
+        if base == "sqrtsd":
+            return f"{self.xmm(ins, d)}.d[0] = sqrt({self.f64(ins, s)});"
+        # ---- bitwise ----
+        bitwise = {"andps": "a & b", "andpd": "a & b", "pand": "a & b", "orps": "a | b", "orpd": "a | b", "por": "a | b",
+                   "xorps": "a ^ b", "xorpd": "a ^ b", "pxor": "a ^ b", "andnps": "~a & b", "andnpd": "~a & b",
+                   "pandn": "~a & b"}
+        if base in bitwise:
+            expr = bitwise[base]
+            return (f"{{ XmmValue bv = {self.v128(ins, s)}; XmmValue* av = &{self.xmm(ins, d)}; for (int k = 0; k < 2; ++k) "
+                    f"{{ uint64_t a = av->u64[k], b = bv.u64[k]; av->u64[k] = {expr}; }} }}")
+        # ---- compares ----
+        preds = {"eq": "a == b", "lt": "a < b", "le": "a <= b", "unord": "a != a || b != b", "neq": "!(a == b)",
+                 "nlt": "!(a < b)", "nle": "!(a <= b)", "ord": "a == a && b == b"}
+        if base.startswith("cmp") and base.endswith("ps") and base[3:-2] in preds:
+            expr = preds[base[3:-2]]
+            return (f"{{ XmmValue bv = {self.v128(ins, s)}; XmmValue* av = &{self.xmm(ins, d)}; for (int k = 0; k < 4; ++k) "
+                    f"{{ float a = av->f[k], b = bv.f[k]; av->u32[k] = ({expr}) ? 0xffffffffu : 0u; }} }}")
+        if base.startswith("cmp") and base.endswith("ss") and base[3:-2] in preds:
+            expr = preds[base[3:-2]]
+            return (f"{{ float a = {self.xmm(ins, d)}.f[0], b = {self.f32(ins, s)}; "
+                    f"{self.xmm(ins, d)}.u32[0] = ({expr}) ? 0xffffffffu : 0u; }}")
+        if base in ("comiss", "ucomiss", "comisd", "ucomisd"):
+            if base.endswith("ss"):
+                a, b, t = f"{self.xmm(ins, d)}.f[0]", self.f32(ins, s), "float"
+            else:
+                a, b, t = f"{self.xmm(ins, d)}.d[0]", self.f64(ins, s), "double"
+            return (f"{{ {t} a = {a}, b = {b}; int un = a != a || b != b; c->zf = un || a == b; c->pf = un; "
+                    f"c->cf = un || a < b; c->of = c->sf = 0; }}")
+        # ---- shuffles ----
+        if base == "shufps":
+            imm = ops[2].imm & 0xff
+            src = self.v128(ins, s)
+            return (f"{{ XmmValue a = {self.xmm(ins, d)}, b = {src}; XmmValue* r = &{self.xmm(ins, d)}; "
+                    f"r->f[0] = a.f[{imm & 3}]; r->f[1] = a.f[{(imm >> 2) & 3}]; r->f[2] = b.f[{(imm >> 4) & 3}]; "
+                    f"r->f[3] = b.f[{(imm >> 6) & 3}]; }}")
+        if base in ("unpcklps", "unpckhps"):
+            lo = 0 if base == "unpcklps" else 2
+            return (f"{{ XmmValue a = {self.xmm(ins, d)}, b = {self.v128(ins, s)}; XmmValue* r = &{self.xmm(ins, d)}; "
+                    f"r->f[0] = a.f[{lo}]; r->f[1] = b.f[{lo}]; r->f[2] = a.f[{lo + 1}]; r->f[3] = b.f[{lo + 1}]; }}")
+        if base == "pshufd":
+            imm = ops[2].imm & 0xff
+            return (f"{{ XmmValue a = {self.v128(ins, s)}; XmmValue* r = &{self.xmm(ins, d)}; "
+                    f"r->u32[0] = a.u32[{imm & 3}]; r->u32[1] = a.u32[{(imm >> 2) & 3}]; r->u32[2] = a.u32[{(imm >> 4) & 3}]; "
+                    f"r->u32[3] = a.u32[{(imm >> 6) & 3}]; }}")
+        # ---- conversions ----
         if base == "cvtsi2ss":
             return f"{self.xmm(ins, d)}.f[0] = (float)(int32_t){self.read(ins, s, 32)};"
+        if base == "cvtsi2sd":
+            return f"{self.xmm(ins, d)}.d[0] = (double)(int32_t){self.read(ins, s, 32)};"
         if base == "cvttss2si":
-            return self.write(ins, d, f"(uint32_t)RecompTruncF32({self.sse_src_f32(ins, s)})")
-        if base in ("comiss", "ucomiss"):
-            a = f"{self.xmm(ins, d)}.f[0]"
-            b = self.sse_src_f32(ins, s)
-            return (f"{{ float a = {a}, b = {b}; int un = a != a || b != b; c->zf = un || a == b; c->pf = un; "
-                    f"c->cf = un || a < b; c->of = c->sf = 0; }}")
-        if base in ("xorps", "andps"):
-            op = "^" if base == "xorps" else "&"
-            if s.type == X.X86_OP_MEM:
-                a = self.address(ins, s)
-                return (f"{{ {self.xmm(ins, d)}.u64[0] {op}= R64({a}); {self.xmm(ins, d)}.u64[1] {op}= R64({a} + 8u); }}")
-            return (f"{{ {self.xmm(ins, d)}.u64[0] {op}= {self.xmm(ins, s)}.u64[0]; "
-                    f"{self.xmm(ins, d)}.u64[1] {op}= {self.xmm(ins, s)}.u64[1]; }}")
+            return self.write(ins, d, f"(uint32_t)RecompTruncF32({self.f32(ins, s)})")
+        if base == "cvtss2si":
+            return self.write(ins, d, f"(uint32_t)RecompRoundToInt((double){self.f32(ins, s)})")
+        if base == "cvttsd2si":
+            return self.write(ins, d, f"(uint32_t)RecompTruncF64({self.f64(ins, s)})")
         if base == "cvtss2sd":
-            return f"{self.xmm(ins, d)}.d[0] = (double){self.sse_src_f32(ins, s)};"
+            return f"{self.xmm(ins, d)}.d[0] = (double){self.f32(ins, s)};"
+        if base == "cvtsd2ss":
+            return f"{self.xmm(ins, d)}.f[0] = (float){self.f64(ins, s)};"
+        if base == "cvttps2dq":
+            return (f"{{ XmmValue a = {self.v128(ins, s)}; XmmValue* r = &{self.xmm(ins, d)}; for (int k = 0; k < 4; ++k) "
+                    f"r->u32[k] = (uint32_t)RecompTruncF32(a.f[k]); }}")
+        if base == "cvtdq2ps":
+            return (f"{{ XmmValue a = {self.v128(ins, s)}; XmmValue* r = &{self.xmm(ins, d)}; for (int k = 0; k < 4; ++k) "
+                    f"r->f[k] = (float)(int32_t)a.u32[k]; }}")
         raise Unsupported(base)
 
-    # ---- x87 helpers (double precision prototype) ----
+    # ---- x87 (double-precision model with control/status words) ----
+    def sti(self, ins, op):
+        name = ins.reg_name(op.reg)
+        if name in ("st(0)", "st0"):
+            return 0
+        if name.startswith("st(") and name.endswith(")"):
+            return int(name[3:-1])
+        if name.startswith("st") and name[2:].isdigit():
+            return int(name[2:])
+        raise Unsupported(f"x87 register {name}")
+
     def x87(self, ins, base):
         ops = ins.operands
-        st = lambda i: f"c->st[(c->st_top + {i}) & 7]"
-        push = "c->st_top = (c->st_top - 1) & 7;"
-        pop = "c->st_top = (c->st_top + 1) & 7;"
+        st = lambda i: f"X87(c, {i})"
+        if base == "lahf":
+            return "c->eax = (c->eax & 0xffff00ffu) | ((uint32_t)RecompLahf(c) << 8);"
+        if base == "sahf":
+            return "RecompSahf(c, (uint8_t)(c->eax >> 8));"
+        if base in ("fnstsw", "fstsw"):
+            if ops and ops[0].type == X.X86_OP_MEM:
+                return f"W16({self.address(ins, ops[0])}, X87StatusWord(c));"
+            return "c->eax = (c->eax & 0xffff0000u) | X87StatusWord(c);"
+        if base in ("fnstcw", "fstcw"):
+            return f"W16({self.address(ins, ops[0])}, c->fpu_cw);"
+        if base == "fldcw":
+            return f"c->fpu_cw = R16({self.address(ins, ops[0])});"
+        if base in ("fninit", "finit"):
+            return "X87Init(c);"
+        if base in ("fnclex", "fclex"):
+            return "c->fpu_sw &= 0x7f00u;"
+        consts = {"fldz": "0.0", "fld1": "1.0", "fldpi": "3.14159265358979323846", "fldl2e": "1.44269504088896340736",
+                  "fldl2t": "3.32192809488736234787", "fldlg2": "0.30102999566398119521", "fldln2": "0.69314718055994530942"}
+        if base in consts:
+            return f"X87Push(c, {consts[base]});"
         if base in ("fld", "fild"):
             op = ops[0]
             if op.type == X.X86_OP_REG:
-                idx = int(ins.reg_name(op.reg)[3:-1]) if "(" in ins.reg_name(op.reg) else 0
-                return f"{{ double v = {st(idx)}; {push} {st(0)} = v; }}"
+                return f"X87Push(c, {st(self.sti(ins, op))});"
             a = self.address(ins, op)
             if base == "fild":
                 v = {2: f"(double)(int16_t)R16({a})", 4: f"(double)(int32_t)R32({a})", 8: f"(double)(int64_t)R64({a})"}[op.size]
             else:
-                v = {4: f"(double)RF32({a})", 8: f"RF64({a})"}.get(op.size)
-                if v is None:
-                    raise Unsupported("fld m80")
-            return f"{{ double v = {v}; {push} {st(0)} = v; }}"
-        if base in ("fst", "fstp", "fistp"):
+                v = {4: f"(double)RF32({a})", 8: f"RF64({a})", 10: f"RecompLoadF80({a})"}.get(op.size)
+            return f"X87Push(c, {v});"
+        if base in ("fst", "fstp", "fist", "fistp"):
             op = ops[0]
-            tail = f" {pop}" if base != "fst" else ""
+            pop = " X87Pop(c);" if base.endswith("p") else ""
             if op.type == X.X86_OP_REG:
-                idx = int(ins.reg_name(op.reg)[3:-1]) if "(" in ins.reg_name(op.reg) else 0
-                return f"{st(idx)} = {st(0)};{tail}"
+                return f"{st(self.sti(ins, op))} = {st(0)};{pop}"
             a = self.address(ins, op)
-            if base == "fistp":
-                w = {2: f"W16({a}, (uint16_t)RecompRoundToInt({st(0)}))", 4: f"W32({a}, (uint32_t)RecompRoundToInt({st(0)}))",
-                     8: f"W64({a}, (uint64_t)RecompRoundToInt64({st(0)}))"}[op.size]
+            if base.startswith("fist"):
+                w = {2: f"W16({a}, (uint16_t)X87ToInt16(c, {st(0)}))", 4: f"W32({a}, (uint32_t)X87ToInt32(c, {st(0)}))",
+                     8: f"W64({a}, (uint64_t)X87ToInt64(c, {st(0)}))"}[op.size]
             else:
-                w = {4: f"WF32({a}, (float){st(0)})", 8: f"WF64({a}, {st(0)})"}.get(op.size)
-                if w is None:
-                    raise Unsupported("fst m80")
-            return f"{w};{tail}"
-        if base == "fldz":
-            return f"{push} {st(0)} = 0.0;"
-        if base == "fld1":
-            return f"{push} {st(0)} = 1.0;"
-        if base == "fchs":
-            return f"{st(0)} = -{st(0)};"
-        if base == "fabs":
-            return f"{st(0)} = fabs({st(0)});"
+                w = {4: f"WF32({a}, (float){st(0)})", 8: f"WF64({a}, {st(0)})", 10: f"RecompStoreF80({a}, {st(0)})"}[op.size]
+            return f"{w};{pop}"
         if base == "fxch":
-            idx = 1
-            if ops:
-                idx = int(ins.reg_name(ops[0].reg)[3:-1]) if "(" in ins.reg_name(ops[0].reg) else 1
-            return f"{{ double t = {st(0)}; {st(0)} = {st(idx)}; {st(idx)} = t; }}"
-        sym = {"fadd": "+", "faddp": "+", "fsub": "-", "fsubp": "-", "fmul": "*", "fmulp": "*", "fdiv": "/", "fdivp": "/"}[base]
-        if len(ops) == 1 and ops[0].type == X.X86_OP_MEM:
-            a = self.address(ins, ops[0])
-            v = {4: f"(double)RF32({a})", 8: f"RF64({a})"}[ops[0].size]
-            return f"{st(0)} = {st(0)} {sym} {v};"
-        raise Unsupported(f"{base} register form")
+            i = self.sti(ins, ops[0]) if ops else 1
+            if ops and len(ops) == 2:
+                i = self.sti(ins, ops[1]) if self.sti(ins, ops[0]) == 0 else self.sti(ins, ops[0])
+            return f"{{ double t = {st(0)}; {st(0)} = {st(i)}; {st(i)} = t; }}"
+        unary = {"fchs": "-v", "fabs": "fabs(v)", "fsqrt": "sqrt(v)", "fsin": "sin(v)", "fcos": "cos(v)",
+                 "f2xm1": "exp2(v) - 1.0", "frndint": "X87RoundRC(c, v)"}
+        if base in unary:
+            return f"{{ double v = {st(0)}; {st(0)} = X87Precision(c, {unary[base]}); }}"
+        if base == "fsincos":
+            return f"{{ double v = {st(0)}; {st(0)} = X87Precision(c, sin(v)); X87Push(c, X87Precision(c, cos(v))); }}"
+        if base == "fptan":
+            return f"{{ {st(0)} = X87Precision(c, tan({st(0)})); X87Push(c, 1.0); }}"
+        if base == "fpatan":
+            return f"{{ {st(1)} = X87Precision(c, atan2({st(1)}, {st(0)})); X87Pop(c); }}"
+        if base == "fyl2x":
+            return f"{{ {st(1)} = X87Precision(c, {st(1)} * log2({st(0)})); X87Pop(c); }}"
+        if base == "fscale":
+            return f"{{ {st(0)} = X87Precision(c, ldexp({st(0)}, (int)trunc({st(1)}))); }}"
+        # ---- comparisons ----
+        if base in ("fcomi", "fcomip", "fucomi", "fucomip", "fcompi", "fucompi"):
+            i = self.sti(ins, ops[-1]) if ops else 1
+            pop = " X87Pop(c);" if base.endswith("p") or base.endswith("pi") else ""
+            return f"X87CompareFlags(c, {st(0)}, {st(i)});{pop}"
+        if base in ("fcom", "fcomp", "fucom", "fucomp", "ficom", "ficomp"):
+            pops = " X87Pop(c);" if base.endswith("p") else ""
+            if not ops:
+                v = st(1)
+            elif ops[0].type == X.X86_OP_REG:
+                v = st(self.sti(ins, ops[-1]))
+            else:
+                a = self.address(ins, ops[0])
+                if base.startswith("fi"):
+                    v = {2: f"(double)(int16_t)R16({a})", 4: f"(double)(int32_t)R32({a})"}[ops[0].size]
+                else:
+                    v = {4: f"(double)RF32({a})", 8: f"RF64({a})"}[ops[0].size]
+            return f"X87CompareStatus(c, {st(0)}, {v});{pops}"
+        if base in ("fcompp", "fucompp"):
+            return f"X87CompareStatus(c, {st(0)}, {st(1)}); X87Pop(c); X87Pop(c);"
+        if base == "ftst":
+            return f"X87CompareStatus(c, {st(0)}, 0.0);"
+        # ---- binary arithmetic ----
+        ops_map = {"add": "a + b", "mul": "a * b", "sub": "a - b", "subr": "b - a", "div": "a / b", "divr": "b / a"}
+        stem = base[1:]
+        integer = False
+        if stem.startswith("i"):
+            integer = True
+            stem = stem[1:]
+        popping = stem.endswith("p") and stem[:-1] in ops_map
+        if popping:
+            stem = stem[:-1]
+        if stem in ops_map:
+            expr = ops_map[stem]
+            if not ops:  # faddp etc. without operands: st(1) = st(1) op st(0), pop
+                return f"{{ double a = {st(1)}, b = {st(0)}; {st(1)} = X87Precision(c, {expr}); X87Pop(c); }}"
+            if len(ops) == 1 and ops[0].type == X.X86_OP_MEM:
+                a_ = self.address(ins, ops[0])
+                if integer:
+                    v = {2: f"(double)(int16_t)R16({a_})", 4: f"(double)(int32_t)R32({a_})"}[ops[0].size]
+                else:
+                    v = {4: f"(double)RF32({a_})", 8: f"RF64({a_})"}[ops[0].size]
+                return f"{{ double a = {st(0)}, b = {v}; {st(0)} = X87Precision(c, {expr}); }}"
+            if len(ops) == 2:
+                dst, src = self.sti(ins, ops[0]), self.sti(ins, ops[1])
+                pop = " X87Pop(c);" if popping else ""
+                return f"{{ double a = {st(dst)}, b = {st(src)}; {st(dst)} = X87Precision(c, {expr});{pop} }}"
+            if len(ops) == 1 and ops[0].type == X.X86_OP_REG:
+                i = self.sti(ins, ops[0])
+                if popping:
+                    return f"{{ double a = {st(i)}, b = {st(0)}; {st(i)} = X87Precision(c, {expr}); X87Pop(c); }}"
+                return f"{{ double a = {st(0)}, b = {st(i)}; {st(0)} = X87Precision(c, {expr}); }}"
+        if base in ("ffree", "fincstp", "fdecstp", "fnop"):
+            return {"ffree": "/* ffree */", "fincstp": "c->st_top = (c->st_top + 1) & 7;",
+                    "fdecstp": "c->st_top = (c->st_top - 1) & 7;", "fnop": "/* fnop */"}[base]
+        raise Unsupported(base)
+
+    def falls_through(self, i):
+        m = i.mnemonic
+        if m == "jmp" or i.group(capstone.CS_GRP_RET) or m in ("ret", "hlt", "ud2"):
+            return False
+        return True
+
+    def successors(self, i, decoded):
+        m = i.mnemonic
+        succ = []
+        if i.group(capstone.CS_GRP_JUMP):
+            op = i.operands[0] if i.operands else None
+            if op is not None and op.type == X.X86_OP_IMM and op.imm in decoded:
+                succ.append(op.imm)
+            succ.extend(d for d in self.table_targets.get(i.address, ()) if d in decoded)
+        if self.falls_through(i):
+            nxt = i.address + i.size
+            if nxt in decoded:
+                succ.append(nxt)
+        return succ
+
+    def liveness(self, decoded):
+        """Flags live after each instruction. Calls clobber the flags (MSVC never reads flags across a call);
+        nothing is live after leaving the function."""
+        info = {}
+        for i in self.ins:
+            defs, uses = flag_sets(i)
+            if i.group(capstone.CS_GRP_CALL):
+                defs, uses = ALL_FLAGS, 0
+            info[i.address] = (defs, uses, self.successors(i, decoded))
+        live_in = {a: 0 for a in info}
+        live_out = {a: 0 for a in info}
+        changed = True
+        order = [i.address for i in reversed(self.ins)]
+        while changed:
+            changed = False
+            for a in order:
+                defs, uses, succ = info[a]
+                out = 0
+                for t in succ:
+                    out |= live_in[t]
+                inn = uses | (out & ~defs)
+                if out != live_out[a] or inn != live_in[a]:
+                    live_out[a], live_in[a] = out, inn
+                    changed = True
+        self.live_out = live_out
+        self.flag_defs = {a: info[a][0] for a in info}
+
+    def flags_dead(self, ins):
+        return (self.flag_defs.get(ins.address, ALL_FLAGS) & self.live_out.get(ins.address, ALL_FLAGS)) == 0
 
     def compile(self):
         labels = self.targets()
-        self.computed_targets = False
+        decoded = {i.address for i in self.ins}
+        self.liveness(decoded)
         body = []
         for i in self.ins:
             line = ""
@@ -475,13 +958,25 @@ class FunctionCompiler:
                 line = f'RecompUnimplemented(c, 0x{i.address:08x}u, "{i.mnemonic} {i.op_str}"); return;'
             body.append((i, line))
         out = [f"void f_{self.va:08x}(Ctx* c) {{"]
-        for i, line in body:
-            if i.address in labels or self.computed_targets:
+        trap_labels = set()
+        for n, (i, line) in enumerate(body):
+            if i.address in labels:
                 out.append(f"L_{i.address:08x}:;")
             out.append(f"    {line}  /* {i.address:08x}: {i.mnemonic} {i.op_str} */")
-        last = self.ins[-1] if self.ins else None
-        if last is None or (last.address + last.size) - self.va < self.size:
-            out.append(f'    RecompUnimplemented(c, 0x{self.va:08x}u, "decode stopped early");')
+            if self.falls_through(i):
+                nxt = i.address + i.size
+                following = body[n + 1][0].address if n + 1 < len(body) else None
+                if following != nxt:
+                    if nxt in decoded:
+                        out.append(f"    goto L_{nxt:08x};")
+                    else:
+                        out.append(f'    RecompUnimplemented(c, 0x{nxt:08x}u, "fell into undecoded bytes"); return;')
+        # Branch targets that were never decoded (int3 or undecodable): traps.
+        for t in sorted(labels - decoded):
+            out.append(f"L_{t:08x}:;")
+            out.append(f'    RecompUnimplemented(c, 0x{t:08x}u, "branch into undecoded bytes"); return;')
+        if not self.ins:
+            out.append(f'    RecompUnimplemented(c, 0x{self.va:08x}u, "no decodable instruction"); return;')
         out.append("}")
         return "\n".join(out)
 
@@ -494,10 +989,74 @@ def Mask(bits):
     return (1 << bits) - 1
 
 
+def entry_patch(fc):
+    """Hook metadata for entering the recompiled function from native code: whole instructions covering >= 5
+    bytes, at most one CALL/JMP rel32 among them, no other relative branch; may extend into int3 padding only."""
+    stolen = b""
+    rel32_at = -1
+    addr = fc.va
+    while len(stolen) < 5:
+        off = addr - fc.va
+        if off >= fc.size:
+            raw = fc.pe.get_data(addr - BASE, 1)
+            if raw != b"\xcc":
+                return None
+            stolen += raw
+            addr += 1
+            continue
+        i = fc.decode_one(addr)
+        if i is None:
+            return None
+        raw = bytes(i.bytes)
+        if raw[0] in (0xE8, 0xE9) and len(raw) == 5:
+            if rel32_at >= 0:
+                return None
+            rel32_at = len(stolen)
+        elif i.group(capstone.CS_GRP_JUMP) or i.group(capstone.CS_GRP_RET) and len(stolen) + len(raw) < 5:
+            if not (i.group(capstone.CS_GRP_RET) and off + len(raw) <= fc.size):
+                return None
+        stolen += raw
+        addr += len(raw)
+    if len(stolen) > 15:
+        return None
+    return stolen, rel32_at
+
+
+def write_split(out_dir, funcs, patches, per_file):
+    os.makedirs(out_dir, exist_ok=True)
+    head = '/* Generated by tools/recomp/recomp.py from prototypeenginef.dll; do not edit. */\n' \
+           '#include <math.h>\n#include "runtime.h"\n#include "runtime_fp.h"\n\n'
+    parts = 0
+    for start in range(0, len(funcs), per_file):
+        chunk = funcs[start:start + per_file]
+        with open(os.path.join(out_dir, f"part_{parts:04d}.c"), "w") as f:
+            f.write(head)
+            for _, text in chunk:
+                f.write(text + "\n\n")
+        parts += 1
+    with open(os.path.join(out_dir, "table.c"), "w") as f:
+        f.write(head)
+        for va, _ in funcs:
+            f.write(f"void f_{va:08x}(Ctx* c);\n")
+        f.write("\nconst struct { uint32_t va; RecompFn fn; } g_recomp_table[] = {\n")
+        for va, _ in funcs:
+            f.write(f"    {{0x{va:08x}u, f_{va:08x}}},\n")
+        f.write("};\nconst uint32_t g_recomp_count = sizeof(g_recomp_table) / sizeof(g_recomp_table[0]);\n\n")
+        f.write("/* Entry patches: va, stolen length, rel32 offset (-1 none), expected bytes. */\n")
+        f.write("const struct { uint32_t va; uint8_t len; int8_t rel32_at; uint8_t bytes[15]; } g_recomp_entries[] = {\n")
+        for va, patch in patches:
+            stolen, rel = patch
+            b = ", ".join(f"0x{x:02x}" for x in stolen)
+            f.write(f"    {{0x{va:08x}u, {len(stolen)}, {rel}, {{{b}}}}},\n")
+        f.write("};\nconst uint32_t g_recomp_entry_count = sizeof(g_recomp_entries) / sizeof(g_recomp_entries[0]);\n")
+    return parts
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--functions", required=True)
-    ap.add_argument("--out", required=True)
+    ap.add_argument("--out", required=True, help="output .c file, or a directory with --split")
+    ap.add_argument("--split", type=int, default=0, help="functions per file (writes part_NNNN.c + table.c)")
     args = ap.parse_args()
     sizes = load_functions()
     if args.functions == "all":
@@ -510,6 +1069,7 @@ def main():
     md.detail = True
     unsupported = collections.Counter()
     funcs = []
+    patches = []
     for va in vas:
         if va not in sizes:
             print(f"skip {va:#x}: not a function start", file=sys.stderr)
@@ -517,6 +1077,16 @@ def main():
         fc = FunctionCompiler(md, pe, va, sizes[va], set(sizes))
         funcs.append((va, fc.compile()))
         unsupported.update(fc.unsupported)
+        patch = entry_patch(fc)
+        if patch:
+            patches.append((va, patch))
+    if args.split:
+        parts = write_split(args.out, funcs, patches, args.split)
+        print(f"{len(funcs)} functions in {parts} files; {len(patches)} enterable from native code; "
+              f"{sum(unsupported.values())} unsupported instructions")
+        for k, v in unsupported.most_common(30):
+            print(f"  {v:6d}  {k}")
+        return
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     with open(args.out, "w") as f:
         f.write("/* Generated by tools/recomp/recomp.py from prototypeenginef.dll; do not edit. */\n")

@@ -206,6 +206,19 @@ TestDetour::~TestDetour() {
     }
 }
 
+namespace {
+
+// Overwrites the start of one of our own functions with JMP rel32 to `to`. Functions are 16-byte aligned
+// (-falign-functions=16); the five bytes must stay inside that alignment block or the function itself.
+bool RedirectHandFunction(void* from, void* to) {
+    auto* p = static_cast<uint8_t*>(from);
+    uint8_t jump[5];
+    WriteJump(jump, p, to);
+    return WriteCode(p, jump, sizeof(jump));
+}
+
+}  // namespace
+
 int InstallHooks(Hook* hooks, size_t count) {
     g_hooks = hooks;
     g_hook_count = count;
@@ -226,8 +239,10 @@ int InstallHooks(Hook* hooks, size_t count) {
         }
         return false;
     };
-    const bool recomp = GetEnvironmentVariableA("PROTORE_RECOMP", nullptr, 0) != 0;
+    const bool redirect_hand = GetEnvironmentVariableA("PROTORE_DIFFTEST_RECOMP", nullptr, 0) != 0;
+    const bool recomp = redirect_hand || GetEnvironmentVariableA("PROTORE_RECOMP", nullptr, 0) != 0;
     int recompiled = 0;
+    int redirected = 0;
     int installed = 0;
     for (size_t i = 0; i < count; ++i) {
         Hook& h = hooks[i];
@@ -241,6 +256,15 @@ int InstallHooks(Hook* hooks, size_t count) {
             continue;
         }
         if (stub) {
+            // PROTORE_DIFFTEST_RECOMP=1: the hand reconstruction itself jumps to the recompiled code, so every
+            // differential test compares the original against the recompiled version.
+            if (redirect_hand && h.replacement) {
+                if (RedirectHandFunction(h.replacement, stub)) {
+                    ++redirected;
+                } else {
+                    Log("recomp: could not redirect hand reconstruction of %s", h.name);
+                }
+            }
             h.replacement = stub;
             ++recompiled;
         }
@@ -253,6 +277,9 @@ int InstallHooks(Hook* hooks, size_t count) {
     }
     if (recomp) {
         Log("recomp: %d hooks run recompiled code", recompiled);
+    }
+    if (redirect_hand) {
+        Log("recomp: %d hand reconstructions redirected to recompiled code", redirected);
     }
     return installed;
 }

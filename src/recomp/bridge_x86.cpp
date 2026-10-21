@@ -25,6 +25,13 @@ extern const struct RecompTableEntry {
     RecompFn fn;
 } g_recomp_table[];
 extern const uint32_t g_recomp_count;
+extern const struct RecompEntryPatch {
+    uint32_t va;
+    uint8_t len;
+    int8_t rel32_at;
+    uint8_t bytes[15];
+} g_recomp_entries[];
+extern const uint32_t g_recomp_entry_count;
 uint8_t* RecompMemoryBase = nullptr;
 }
 
@@ -110,6 +117,7 @@ extern "C" ExitRecord* RecompEnterC(EntryFrame* frame) {
     ctx.edi = frame->edi;
     ctx.esp = reinterpret_cast<uint32_t>(&frame->fn) + 4;  // the guest return address
     ctx.fpu_cw = 0x027f;
+    asm volatile("movl %%fs:0x18, %0" : "=r"(ctx.fs_base));  // TEB self pointer
     frame->fn(&ctx);
 
     static thread_local ExitRecord exit_record;
@@ -241,7 +249,11 @@ extern "C" void RecompDispatch(Ctx* ctx, uint32_t target) {
     Ctx* saved_ctx = b->native_ctx;
     const uint32_t saved_resume = b->host_resume;
     const uint32_t saved_top = b->host_top;
+    // The native code pops the return address slot itself (it is replaced by RecompNativeReturn below). For a
+    // tail call that slot holds the real return address of the recompiled function, so keep it as ret_target.
+    const uint32_t return_slot = R32(ctx->esp);
     RecompCallNativeAsm(ctx, target);
+    ctx->ret_target = return_slot;
     b->native_ctx = saved_ctx;
     b->host_resume = saved_resume;
     b->host_top = saved_top;
@@ -252,12 +264,146 @@ extern "C" void RecompDispatch(Ctx* ctx, uint32_t target) {
     }
 }
 
+extern "C" void RecompCpuid(Ctx* ctx) {
+    uint32_t a = ctx->eax, b, c = ctx->ecx, d;
+    asm volatile("cpuid" : "+a"(a), "=b"(b), "+c"(c), "=d"(d));
+    ctx->eax = a;
+    ctx->ebx = b;
+    ctx->ecx = c;
+    ctx->edx = d;
+}
+
+// ---- setjmp/longjmp ------------------------------------------------------------------------------------------
+
+namespace {
+
+constexpr int kJmpSlots = 64;
+
+struct JmpSlots {
+    RecompJmpSlot slots[kJmpSlots];
+    int next;
+};
+
+JmpSlots* ThreadJmpSlots() {
+    static thread_local JmpSlots* slots = nullptr;
+    if (!slots) {
+        slots = static_cast<JmpSlots*>(VirtualAlloc(nullptr, sizeof(JmpSlots), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    }
+    return slots;
+}
+
+RecompJmpSlot* FindSlot(uint32_t guest_buf, bool create) {
+    JmpSlots* t = ThreadJmpSlots();
+    for (int i = 0; i < kJmpSlots; ++i) {
+        if (t->slots[i].guest_buf == guest_buf) {
+            return &t->slots[i];
+        }
+    }
+    if (!create) {
+        return nullptr;
+    }
+    RecompJmpSlot* s = &t->slots[t->next];
+    t->next = (t->next + 1) % kJmpSlots;
+    s->guest_buf = guest_buf;
+    return s;
+}
+
+}  // namespace
+
+extern "C" void RecompBridgeSave(uint8_t state[32]) {
+    Bridge* b = ThreadBridge();
+    uint32_t words[3] = {b->host_top, reinterpret_cast<uint32_t>(b->native_ctx), b->host_resume};
+    memcpy(state, words, sizeof(words));
+}
+
+extern "C" void RecompBridgeRestore(const uint8_t state[32]) {
+    Bridge* b = ThreadBridge();
+    uint32_t words[3];
+    memcpy(words, state, sizeof(words));
+    b->host_top = words[0];
+    b->native_ctx = reinterpret_cast<Ctx*>(words[1]);
+    b->host_resume = words[2];
+}
+
+extern "C" jmp_buf* RecompSetjmpPrepare(Ctx* ctx, uint32_t guest_buf) {
+    RecompJmpSlot* s = FindSlot(guest_buf, true);
+    s->esp = ctx->esp;
+    s->ebp = ctx->ebp;
+    s->ebx = ctx->ebx;
+    s->esi = ctx->esi;
+    s->edi = ctx->edi;
+    s->st_top = ctx->st_top;
+    s->fpu_cw = ctx->fpu_cw;
+    s->value = 0;
+    RecompBridgeSave(s->bridge_state);
+    return &s->host;
+}
+
+extern "C" void RecompSetjmpResume(Ctx* ctx, uint32_t guest_buf) {
+    RecompJmpSlot* s = FindSlot(guest_buf, false);
+    ctx->esp = s->esp;
+    ctx->ebp = s->ebp;
+    ctx->ebx = s->ebx;
+    ctx->esi = s->esi;
+    ctx->edi = s->edi;
+    ctx->st_top = s->st_top;
+    ctx->fpu_cw = s->fpu_cw;
+    ctx->eax = s->value;
+}
+
+extern "C" void RecompLongjmp(Ctx* ctx, uint32_t guest_buf, uint32_t value) {
+    RecompJmpSlot* s = FindSlot(guest_buf, false);
+    if (!s) {
+        RecompUnimplemented(ctx, guest_buf, "longjmp to an unknown jmp_buf");
+    }
+    s->value = value ? value : 1;
+    RecompBridgeRestore(s->bridge_state);
+    longjmp(s->host, 1);
+}
+
 extern "C" void RecompUnimplemented(Ctx* ctx, uint32_t va, const char* what) {
     protore::Log("recomp: unimplemented instruction at %08x (%s), esp=%08x", va, what, ctx->esp);
     TerminateProcess(GetCurrentProcess(), 0x7e);
 }
 
 namespace protore {
+
+int InstallAllRecompEntries() {
+    // Unprotect the engine's code once, write `jmp stub` (int3-filled) at every enterable function, restore.
+    auto* base = static_cast<uint8_t*>(EngineAddress(0));
+    auto* nt = reinterpret_cast<IMAGE_NT_HEADERS32*>(base + reinterpret_cast<IMAGE_DOS_HEADER*>(base)->e_lfanew);
+    const uint32_t code_start = nt->OptionalHeader.BaseOfCode;
+    const uint32_t code_size = nt->OptionalHeader.SizeOfCode;
+    DWORD old_protect;
+    if (!VirtualProtect(base + code_start, code_size, PAGE_EXECUTE_READWRITE, &old_protect)) {
+        Log("recomp: cannot unprotect engine code");
+        return 0;
+    }
+    int installed = 0, mismatched = 0;
+    for (uint32_t i = 0; i < g_recomp_entry_count; ++i) {
+        const RecompEntryPatch& e = g_recomp_entries[i];
+        auto* target = reinterpret_cast<uint8_t*>(e.va - kEngineImageBase + reinterpret_cast<uintptr_t>(base));
+        if (memcmp(target, e.bytes, e.len) != 0) {
+            ++mismatched;  // already patched by a hand hook or different build: leave it
+            continue;
+        }
+        void* stub = RecompEntryStub(e.va);
+        if (!stub) {
+            continue;
+        }
+        int32_t rel = static_cast<int32_t>(reinterpret_cast<uintptr_t>(stub) - reinterpret_cast<uintptr_t>(target + 5));
+        target[0] = 0xE9;
+        memcpy(target + 1, &rel, 4);
+        for (uint32_t k = 5; k < e.len; ++k) {
+            target[k] = 0xCC;
+        }
+        ++installed;
+    }
+    VirtualProtect(base + code_start, code_size, old_protect, &old_protect);
+    FlushInstructionCache(GetCurrentProcess(), base + code_start, code_size);
+    Log("recomp: %d function entries redirected to recompiled code (%d skipped: bytes differ)", installed, mismatched);
+    return installed;
+}
 
 void* RecompEntryStub(uint32_t va) {
     RecompFn fn = RecompLookup(va);
@@ -267,7 +413,7 @@ void* RecompEntryStub(uint32_t va) {
     static uint8_t* pool = nullptr;
     static size_t used = 0;
     if (!pool) {
-        pool = static_cast<uint8_t*>(VirtualAlloc(nullptr, 1 << 20, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+        pool = static_cast<uint8_t*>(VirtualAlloc(nullptr, 2 << 20, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
     }
     uint8_t* stub = pool + used;
     used += 16;
