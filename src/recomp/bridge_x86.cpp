@@ -232,7 +232,36 @@ int Compare(const void* key, const void* entry) {
 
 }  // namespace
 
+namespace {
+
+// PROTORE_RECOMP_RANGE=<lo>-<hi> (hex VAs, hi exclusive): only functions in the range run recompiled; the rest stay
+// native. Used to bisect a misbehaving function.
+uint32_t g_range_lo = 0, g_range_hi = 0xffffffffu;
+
+void LoadRange() {
+    static bool loaded = false;
+    if (loaded) {
+        return;
+    }
+    loaded = true;
+    char text[64] = "";
+    if (GetEnvironmentVariableA("PROTORE_RECOMP_RANGE", text, sizeof(text)) && strchr(text, '-')) {
+        g_range_lo = strtoul(text, nullptr, 16);
+        g_range_hi = strtoul(strchr(text, '-') + 1, nullptr, 16);
+        protore::Log("recomp: range %08x-%08x", g_range_lo, g_range_hi);
+    }
+}
+
+bool InRange(uint32_t va) {
+    return va >= g_range_lo && va < g_range_hi;
+}
+
+}  // namespace
+
 extern "C" RecompFn RecompLookup(uint32_t target) {
+    if (!InRange(target)) {
+        return nullptr;
+    }
     const void* hit = bsearch(&target, g_recomp_table, g_recomp_count, sizeof(RecompTableEntry), &Compare);
     return hit ? static_cast<const RecompTableEntry*>(hit)->fn : nullptr;
 }
@@ -249,6 +278,21 @@ extern "C" void RecompDispatch(Ctx* ctx, uint32_t target) {
     Ctx* saved_ctx = b->native_ctx;
     const uint32_t saved_resume = b->host_resume;
     const uint32_t saved_top = b->host_top;
+    // Diagnostics for native CRT calls that depend on FPU state (PROTORE_TRACE_FPU=1).
+    static uint32_t controlfp_s = 0;
+    static int trace_fpu = -1;
+    if (trace_fpu < 0) {
+        trace_fpu = GetEnvironmentVariableA("PROTORE_TRACE_FPU", nullptr, 0) != 0;
+        controlfp_s = reinterpret_cast<uint32_t>(GetProcAddress(GetModuleHandleA("msvcr80.dll"), "_controlfp_s"));
+    }
+    if (trace_fpu && target == controlfp_s) {
+        uint16_t x87_cw;
+        uint32_t mxcsr;
+        asm volatile("fnstcw %0\n\tstmxcsr %1" : "=m"(x87_cw), "=m"(mxcsr));
+        protore::Log("trace: _controlfp_s(cur=%08x, new=%08x, mask=%08x) ret=%08x host cw=%04x mxcsr=%08x guest cw=%04x",
+                     R32(ctx->esp + 4), R32(ctx->esp + 8), R32(ctx->esp + 12), R32(ctx->esp), x87_cw, mxcsr,
+                     ctx->fpu_cw);
+    }
     // The native code pops the return address slot itself (it is replaced by RecompNativeReturn below). For a
     // tail call that slot holds the real return address of the recompiled function, so keep it as ret_target.
     const uint32_t return_slot = R32(ctx->esp);
@@ -379,9 +423,13 @@ int InstallAllRecompEntries() {
         Log("recomp: cannot unprotect engine code");
         return 0;
     }
+    LoadRange();
     int installed = 0, mismatched = 0;
     for (uint32_t i = 0; i < g_recomp_entry_count; ++i) {
         const RecompEntryPatch& e = g_recomp_entries[i];
+        if (!InRange(e.va)) {
+            continue;
+        }
         auto* target = reinterpret_cast<uint8_t*>(e.va - kEngineImageBase + reinterpret_cast<uintptr_t>(base));
         if (memcmp(target, e.bytes, e.len) != 0) {
             ++mismatched;  // already patched by a hand hook or different build: leave it
