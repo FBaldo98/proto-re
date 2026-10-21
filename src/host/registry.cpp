@@ -1,5 +1,7 @@
 #include "registry.h"
 
+#include "../core/file_system.h"
+#include "../core/memory.h"
 #include "../core/cement_file_range.h"
 #include "../core/cement_library.h"
 #include "../core/name_hash.h"
@@ -43,6 +45,18 @@ Hook g_hooks[] = {
     // mov eax,[esp+4]; push esi
     {"core::CementLibrarySetState", 0x00650410, reinterpret_cast<void*>(&core::CementLibrarySetState),
      {0x8b, 0x44, 0x24, 0x04, 0x56, 0x8b, 0xf1}, 7, 5, true, {}},
+    // push ebx; push ebp; push esi; push edi; mov edi,[esp+1Ch]
+    {"core::Alloc", 0x0063a8d0, reinterpret_cast<void*>(&core::Alloc),
+     {0x53, 0x55, 0x56, 0x57, 0x8b, 0x7c, 0x24, 0x1c}, 8, 8, true, {}},
+    // mov ecx,[esp+8]; test ecx,ecx
+    {"core::RoundUp", 0x00645300, reinterpret_cast<void*>(&core::RoundUp),
+     {0x8b, 0x4c, 0x24, 0x08, 0x85, 0xc9, 0x56}, 7, 6, true, {}},
+    // mov eax,[1127CA14h]
+    {"core::FileSystemIoBufferSize", 0x0064a130, reinterpret_cast<void*>(&core::FileSystemIoBufferSize),
+     {0xa1, 0x14, 0xca, 0x27, 0x11, 0xc3}, 6, 5, true, {}},
+    // push esi; mov esi,ecx; cmp dword ptr [esi+34h],0
+    {"core::IoBufferHolderAcquire", 0x006506b0, reinterpret_cast<void*>(&core::IoBufferHolderAcquire),
+     {0x56, 0x8b, 0xf1, 0x83, 0x7e, 0x34, 0x00}, 7, 7, true, {}},
 };
 
 }  // namespace

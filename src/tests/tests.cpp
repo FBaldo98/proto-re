@@ -11,6 +11,7 @@ const protore::DiffTest g_tests[] = {
     {"core::CementLibrary lookup", &TestCementLookup},
     {"core::CementFileRangeInit", &TestCementFileRange},
     {"core::CementLibrary header/state", &TestCementState},
+    {"core::Alloc/RoundUp/IoBuffer", &TestMemory},
 };
 
 }  // namespace
