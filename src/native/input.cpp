@@ -4,6 +4,9 @@
 //   EngineMouseService(msg, wParam = MK_* button state, lParam = y << 16 | x) for WM_MOUSEMOVE..WM_MOUSEWHEEL.
 #include <SDL2/SDL.h>
 
+#include <atomic>
+#include <vector>
+
 #include "guest.h"
 
 namespace native {
@@ -102,7 +105,39 @@ void Mouse(uint32_t msg, uint32_t wparam, uint32_t lparam) {
     if (g_mouse_service) GuestCall(g_mouse_service, {msg, wparam, lparam});
 }
 
+// Relative mouse motion since the last DirectInput read (dinput.cpp).
+std::atomic<int32_t> g_mouse_dx{0}, g_mouse_dy{0}, g_mouse_dz{0};
+
 }  // namespace
+
+// ---- state for the DirectInput devices (dinput.cpp) ----
+// DirectInput key codes (DIK_*) are set-1 scan codes, with 0x80 for the extended (E0-prefixed) keys.
+std::vector<uint8_t> KeyboardDiks() {
+    std::vector<uint8_t> out;
+    for (const KeyMap& k : kKeys) out.push_back(uint8_t(k.scan | (k.extended ? 0x80 : 0)));
+    return out;
+}
+
+bool DikDown(uint8_t dik) {
+    const Uint8* state = SDL_GetKeyboardState(nullptr);
+    for (const KeyMap& k : kKeys) {
+        if (uint8_t(k.scan | (k.extended ? 0x80 : 0)) == dik && state[k.sdl]) return true;
+    }
+    return false;
+}
+
+void TakeMouseMotion(int32_t* dx, int32_t* dy, int32_t* dz) {
+    *dx = g_mouse_dx.exchange(0);
+    *dy = g_mouse_dy.exchange(0);
+    *dz = g_mouse_dz.exchange(0);
+}
+
+// Bit i: DirectInput mouse button i (0 left, 1 right, 2 middle, 3/4 extra).
+uint32_t MouseButtonMask() {
+    uint32_t b = SDL_GetMouseState(nullptr, nullptr);
+    return (b & SDL_BUTTON_LMASK ? 1u : 0u) | (b & SDL_BUTTON_RMASK ? 2u : 0u) | (b & SDL_BUTTON_MMASK ? 4u : 0u) |
+           (b & SDL_BUTTON_X1MASK ? 8u : 0u) | (b & SDL_BUTTON_X2MASK ? 16u : 0u);
+}
 
 void InitInput(uint32_t keyboard_service, uint32_t mouse_service) {
     g_keyboard_service = keyboard_service;
@@ -132,6 +167,8 @@ void ForwardInput(const SDL_Event& e) {
             break;
         }
         case SDL_MOUSEMOTION:
+            g_mouse_dx += e.motion.xrel;
+            g_mouse_dy += e.motion.yrel;
             if (w) Mouse(kWmMouseMove, ButtonState(), PackPoint(w, e.motion.x, e.motion.y));
             break;
         case SDL_MOUSEBUTTONDOWN:
@@ -148,6 +185,7 @@ void ForwardInput(const SDL_Event& e) {
             int x = 0, y = 0;
             SDL_GetMouseState(&x, &y);
             uint32_t delta = uint32_t(int16_t(e.wheel.y * 120)) & 0xffff;
+            g_mouse_dz += e.wheel.y * 120;
             if (w) Mouse(kWmMouseWheel, delta << 16 | ButtonState(), PackPoint(w, x, y));
             break;
         }

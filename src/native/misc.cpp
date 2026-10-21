@@ -11,7 +11,8 @@
 
 namespace native {
 
-bool CreateXAudio2(uint32_t clsid, uint32_t out, uint32_t* hr);  // xaudio2.cpp
+bool CreateXAudio2(uint32_t clsid, uint32_t out, uint32_t* hr);       // xaudio2.cpp
+bool CreateDirectInput8(uint32_t clsid, uint32_t out, uint32_t* hr);  // dinput.cpp
 
 namespace {
 
@@ -66,7 +67,7 @@ F(CoInitialize) { Return(c, 0, 1); }
 F(CoUninitialize) { Return(c, 0); }
 F(CoCreateInstance) {
     uint32_t hr;
-    if (CreateXAudio2(Arg(c, 0), Arg(c, 4), &hr)) {
+    if (CreateXAudio2(Arg(c, 0), Arg(c, 4), &hr) || CreateDirectInput8(Arg(c, 0), Arg(c, 4), &hr)) {
         Return(c, hr, 5);
         return;
     }

@@ -296,7 +296,55 @@ M(IDirect3DDevice9, Reset) {
     ToGuest(pp, Arg(c, 1));
     Return(c, uint32_t(hr), 2);
 }
+// PROTORE_SHOT=<frame>[,<frame>...]: the back buffer of those presents is saved as shot_<frame>.ppm in the working
+// directory (debugging without a desktop screenshot tool, and later on Android).
+void MaybeScreenshot(IDirect3DDevice9* dev) {
+    static const char* spec = getenv("PROTORE_SHOT");
+    static uint32_t frame = 0;
+    ++frame;
+    if (!spec) return;
+    bool want = false;
+    for (const char* p = spec; *p;) {
+        char* end;
+        if (strtoul(p, &end, 10) == frame) want = true;
+        p = *end ? end + 1 : end;
+    }
+    if (!want) return;
+    IDirect3DSurface9* bb = nullptr;
+    if (FAILED(dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &bb))) return;
+    D3DSURFACE_DESC d;
+    bb->GetDesc(&d);
+    IDirect3DSurface9* sys = nullptr;
+    D3DLOCKED_RECT lr;
+    if ((d.Format == D3DFMT_X8R8G8B8 || d.Format == D3DFMT_A8R8G8B8) &&
+        SUCCEEDED(dev->CreateOffscreenPlainSurface(d.Width, d.Height, d.Format, D3DPOOL_SYSTEMMEM, &sys, nullptr)) &&
+        SUCCEEDED(dev->GetRenderTargetData(bb, sys)) && SUCCEEDED(sys->LockRect(&lr, nullptr, D3DLOCK_READONLY))) {
+        std::string name = "shot_" + std::to_string(frame) + ".ppm";
+        if (FILE* f = fopen(name.c_str(), "wb")) {
+            fprintf(f, "P6\n%u %u\n255\n", d.Width, d.Height);
+            std::vector<uint8_t> row(3 * d.Width);
+            for (uint32_t y = 0; y < d.Height; ++y) {
+                const uint8_t* src = static_cast<const uint8_t*>(lr.pBits) + size_t(y) * size_t(lr.Pitch);
+                for (uint32_t x = 0; x < d.Width; ++x) {
+                    row[3 * x] = src[4 * x + 2];
+                    row[3 * x + 1] = src[4 * x + 1];
+                    row[3 * x + 2] = src[4 * x];
+                }
+                fwrite(row.data(), 1, row.size(), f);
+            }
+            fclose(f);
+            Log("screenshot %s (%ux%u)", name.c_str(), d.Width, d.Height);
+        }
+        sys->UnlockRect();
+    } else {
+        Log("screenshot of frame %u failed (format %d)", frame, int(d.Format));
+    }
+    if (sys) sys->Release();
+    bb->Release();
+}
+
 M(IDirect3DDevice9, Present) {
+    MaybeScreenshot(Host<IDirect3DDevice9>(Arg(c, 0)));
     HRESULT hr = Host<IDirect3DDevice9>(Arg(c, 0))->Present(Ptr<RECT>(Arg(c, 1)), Ptr<RECT>(Arg(c, 2)), nullptr,
                                                             nullptr);
     Return(c, uint32_t(hr), 5);

@@ -20,7 +20,7 @@ RECOMP_CFLAGS := -std=c11 -O1 -g0 -fno-strict-aliasing -fwrapv -fno-delete-null-
 LDFLAGS := -pthread -L$(DXVK_LIB) -Wl,-rpath,$(DXVK_LIB) -ldxvk_d3d9 -L$(FAUDIO_LIB) -Wl,-rpath,$(FAUDIO_LIB) -lFAudio -lSDL2
 
 SRCS := main.cpp memory.cpp loader.cpp imports.cpp runtime.cpp thread.cpp kernel32.cpp msvcr80.cpp user32.cpp \
-        advapi32.cpp misc.cpp d3d9.cpp input.cpp xaudio2.cpp bink.cpp
+        advapi32.cpp misc.cpp d3d9.cpp input.cpp xaudio2.cpp bink.cpp dinput.cpp
 GEN := $(wildcard $(RECOMP_DIR)/*.c)
 OBJS = $(SRCS:%.cpp=$(OUT)/%.o) $(GEN:$(RECOMP_DIR)/%.c=$(OUT)/gen/%.o)
 
