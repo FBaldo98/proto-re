@@ -98,7 +98,7 @@ void* OriginalFunction(uint32_t rva) {
 }
 
 bool DetourAttach(Detour* d, uint32_t rva, size_t stolen_len, const uint8_t* expected, size_t expected_len,
-                  void* replacement) {
+                  void* replacement, int rel32_at) {
     auto* target = static_cast<uint8_t*>(EngineAddress(rva));
     if (!target || stolen_len < 5 || stolen_len > sizeof(d->saved) || expected_len < stolen_len) {
         return false;
@@ -106,11 +106,23 @@ bool DetourAttach(Detour* d, uint32_t rva, size_t stolen_len, const uint8_t* exp
     if (memcmp(target, expected, expected_len) != 0) {
         return false;
     }
+    if (rel32_at >= 0 && (static_cast<size_t>(rel32_at) + 5 > stolen_len ||
+                          (target[rel32_at] != 0xE8 && target[rel32_at] != 0xE9))) {
+        return false;
+    }
     uint8_t* tramp = AllocTrampoline(stolen_len + 5);
     if (!tramp) {
         return false;
     }
     memcpy(tramp, target, stolen_len);
+    if (rel32_at >= 0) {
+        int32_t rel;
+        memcpy(&rel, target + rel32_at + 1, sizeof(rel));
+        const uint8_t* destination = target + rel32_at + 5 + rel;
+        int32_t moved = static_cast<int32_t>(reinterpret_cast<uintptr_t>(destination) -
+                                             reinterpret_cast<uintptr_t>(tramp + rel32_at + 5));
+        memcpy(tramp + rel32_at + 1, &moved, sizeof(moved));
+    }
     WriteJump(tramp + stolen_len, tramp + stolen_len, target + stolen_len);
 
     // PROTORE_NULLPATCH=1 performs the same protect/write/restore sequence but writes back the original
@@ -141,7 +153,7 @@ void DetourDetach(Detour* d) {
 }
 
 TestDetour::TestDetour(uint32_t rva, size_t stolen_len, const uint8_t* expected, size_t expected_len,
-                       void* replacement) {
+                       void* replacement, int rel32_at) {
     for (size_t i = 0; i < g_hook_count; ++i) {
         if (g_hooks[i].rva == rva && g_hooks[i].detour.target) {
             suspended_ = &g_hooks[i];
@@ -149,7 +161,7 @@ TestDetour::TestDetour(uint32_t rva, size_t stolen_len, const uint8_t* expected,
             break;
         }
     }
-    if (!DetourAttach(&detour_, rva, stolen_len, expected, expected_len, replacement)) {
+    if (!DetourAttach(&detour_, rva, stolen_len, expected, expected_len, replacement, rel32_at)) {
         Log("TestDetour: could not detour rva 0x%08x", rva);
     }
 }
@@ -158,7 +170,7 @@ TestDetour::~TestDetour() {
     DetourDetach(&detour_);
     if (suspended_) {
         Hook& h = *suspended_;
-        if (!DetourAttach(&h.detour, h.rva, h.stolen_len, h.expected, h.expected_len, h.replacement)) {
+        if (!DetourAttach(&h.detour, h.rva, h.stolen_len, h.expected, h.expected_len, h.replacement, h.rel32_at)) {
             Log("TestDetour: could not restore hook %s", h.name);
         }
     }
@@ -176,7 +188,7 @@ int InstallHooks(Hook* hooks, size_t count) {
         if (!h.enabled || (only[0] && strcmp(only, h.name) != 0)) {
             continue;
         }
-        if (!DetourAttach(&h.detour, h.rva, h.stolen_len, h.expected, h.expected_len, h.replacement)) {
+        if (!DetourAttach(&h.detour, h.rva, h.stolen_len, h.expected, h.expected_len, h.replacement, h.rel32_at)) {
             Log("hook %s: not installed at rva 0x%08x (bytes mismatch or protect failure)", h.name, h.rva);
             continue;
         }

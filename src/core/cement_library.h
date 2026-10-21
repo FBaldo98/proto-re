@@ -55,6 +55,60 @@ enum CementLoadPhase : int32_t {
 // sub-object (library + 4), ret 4. One step of the load state machine; see cement_library.cpp for the phases.
 void __thiscall CementLibraryLoadStep(void* load_interface, int32_t phase);
 
+// ---- object lifetime ----
+
+// Optional pre-loaded directory handed to the constructor: the header copy, the entries, and their heap.
+struct CementPreloaded {
+    const uint8_t* header;  // 0x3c bytes
+    void* entries;
+    uint32_t heap;
+};
+
+// Original: FUN_10650ba0 (rva 0x00650ba0), thiscall, ret 14h. Takes references on both drives and the stream and
+// queues the first load phase on the stream (phase 0, or phase 2 directly when `preloaded` is given).
+CementLibrary* __thiscall CementLibraryConstruct(CementLibrary* self, void* drive, void* stream, uint32_t list_index,
+                                                 const CementPreloaded* preloaded, void* registration_drive);
+
+// Original: FUN_10650730 (rva 0x00650730), thiscall. Cancels a pending load or unregisters a loaded library (and
+// releases the drive's I/O buffer when it held one), releases the drives and stream, frees the directory.
+void __thiscall CementLibraryDestruct(CementLibrary* self);
+
+// Original: FUN_10650cb0 (rva 0x00650cb0), thiscall, ret 4. Destructs; with flag bit 0 also frees the object to the
+// heap the destructor published in the engine's current-heap global.
+CementLibrary* __thiscall CementLibraryDeletingDestruct(CementLibrary* self, uint32_t flags);
+
+// Reference counting on the SafeRefCount sub-object (+0x10 lock object, +0x14 count). FUN_10650830 / FUN_10650850.
+uint32_t __thiscall CementLibraryAddRef(CementLibrary* self);
+uint32_t __thiscall CementLibraryRelease(CementLibrary* self);
+
+// ---- small methods ----
+
+// FUN_10650360: polls the file system (FUN_1064a030) and yields until the state leaves 0.
+void __thiscall CementLibraryWaitUntilSettled(CementLibrary* self);
+// FUN_10650390: 1 when loaded, else 0 (full eax).
+uint32_t __thiscall CementLibraryIsLoaded(CementLibrary* self);
+// FUN_106503a0 (ret 8): remembers a completion object and its argument and takes a reference (its slot 0).
+void __thiscall CementLibrarySetCompletion(CementLibrary* self, void* completion, uint32_t argument);
+
+// FUN_10650330 / FUN_10650340: tail-jump into slot 0 / slot 1 of the interface at (*(self + 0x10)) + 4, leaving the
+// caller's stack untouched. Implemented in assembly to keep that exact shape.
+extern "C" void CementLibraryForwardSlot0();
+extern "C" void CementLibraryForwardSlot1();
+
+// ---- open by key ----
+
+struct File;
+
+// Original: FUN_10650460 (rva 0x00650460), thiscall, ret 18h. Creates a core::File named "0x<KEY>" on the library's
+// drive and queues a FileOpenByKeyRequest for it on that drive. *out receives the file (or null).
+void __thiscall CementLibraryOpenByKey(CementLibrary* self, File** out, uint32_t key, uint32_t a3, uint32_t a4,
+                                       uint32_t a5, uint32_t a6);
+
+// Original: FUN_10650500 (rva 0x00650500), thiscall, ret 18h. Calls the object's vtable slot 7 (OpenByKey) with the
+// same arguments, then slot 21 of the resulting file when there is one.
+void __thiscall CementLibraryOpenByKeyAndWait(CementLibrary* self, File** out, uint32_t key, uint32_t a3, uint32_t a4,
+                                              uint32_t a5, uint32_t a6);
+
 // Original: FUN_106502c0 (rva 0x006502c0), cdecl. Binary search over `count` records of `stride` bytes whose
 // first word is an unsigned key; returns the matching record or null. The midpoint is computed as
 // (hi >> 1) + (lo >> 1) + (lo & hi & 1) and the probe order must be kept: with duplicate keys it decides which

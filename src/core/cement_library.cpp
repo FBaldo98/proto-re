@@ -255,6 +255,267 @@ void __thiscall CementLibraryLoadStep(void* load_interface, int32_t phase) {
     Engine<SetStateFn>(kSetStateRva)(library, kCementStateLoaded);
 }
 
+// ---- object lifetime ----------------------------------------------------------------------------------------
+
+namespace {
+
+// Engine vtables (rva) written by the constructor and destructor for the four sub-objects at +0, +4, +8, +0x10.
+constexpr uint32_t kVtablesBase[4] = {0x00e47f58, 0x00e2c0b8, 0x00e2c040, 0x00e47eac};    // base classes
+constexpr uint32_t kVtablesFinal[4] = {0x00e48000, 0x00e47fec, 0x00e47fe4, 0x00e47fd4};   // CementLibrary
+constexpr uint32_t kVtablesDestroyed[4] = {0x00d96db8, 0x00d96db8, 0x00e2c040, 0x00e47eac};
+constexpr uint32_t kVtableOffsets[4] = {0x00, 0x04, 0x08, 0x10};
+
+// Engine global: heap of the object being constructed/destroyed (-1 = none). Constructors consume it, destructors
+// publish the object's heap for the deleting destructor.
+constexpr uint32_t kCurrentHeapRva = 0x010bccbc;
+constexpr uint32_t kObjectHeapOffset = 0x0c;
+constexpr uint32_t kRefCountOffset = 0x14;
+constexpr uint32_t kRefCountLockOffset = 0x10;       // SafeRefCount sub-object: its slot 0 locks, slot 1 unlocks
+constexpr uint32_t kListIndexOffset = 0x6c;
+constexpr uint32_t kNextOffset = 0x68;
+constexpr int32_t kReleasedRefCount = 500000;         // stored when the count reaches zero, before deletion
+constexpr int kStreamSlotCancel = 17;                 // vtable +0x44
+constexpr int kSlotAddRef = 0;
+constexpr int kSlotRelease = 1;
+constexpr int kSlotDeletingDestructor = 2;
+constexpr uint32_t kDestructorAssertFlagRva = 0x010bd87a;
+constexpr int kDestructorAssertLine = 0xe0;
+
+constexpr uint32_t kConstructionMarkerRva = 0x006447f0;
+constexpr uint32_t kReleaseBufferRva = 0x006506f0;
+constexpr uint32_t kUnregisterLibraryRva = 0x0064ff00;  // thiscall(drive, library): adjusts to the holder
+constexpr uint32_t kFreeRva = 0x0063a9c0;
+constexpr uint32_t kFreeObjectRva = 0x0063a9a0;
+constexpr uint32_t kFileSystemPumpRva = 0x00643c20;     // thunk to FUN_1064a030
+constexpr uint32_t kThreadSleepRva = 0x00644b40;
+
+using MarkerFn = const void*(__cdecl*)();
+using VoidMethodFn = void(__thiscall*)(void*);
+using WordMethodFn = uint32_t(__thiscall*)(void*);
+using DeletingFn = uint32_t(__thiscall*)(void*, uint32_t);
+using ReleaseBufferFn = void(__thiscall*)(IoBufferHolder*);
+using UnregisterLibraryFn = void(__thiscall*)(void* drive, CementLibrary* library);
+using HeapFreeFn = void(__cdecl*)(uint32_t heap, void* p);
+using PumpFn = void(__cdecl*)();
+using SleepFn = void(__cdecl*)(uint32_t);
+
+int32_t& CurrentHeap() {
+    return *static_cast<int32_t*>(protore::EngineAddress(kCurrentHeapRva));
+}
+
+void WriteVtables(CementLibrary* self, const uint32_t (&rvas)[4]) {
+    for (int i = 0; i < 4; ++i) {
+        SetField<void*>(self, kVtableOffsets[i], protore::EngineAddress(rvas[i]));
+    }
+}
+
+void CallSlot(void* object, int slot) {
+    Slot<VoidMethodFn>(object, slot)(object);
+}
+
+}  // namespace
+
+CementLibrary* __thiscall CementLibraryConstruct(CementLibrary* self, void* drive, void* stream, uint32_t list_index,
+                                                 const CementPreloaded* preloaded, void* registration_drive) {
+    for (int i = 0; i < 3; ++i) {
+        SetField<void*>(self, kVtableOffsets[i], protore::EngineAddress(kVtablesBase[i]));
+    }
+    SetField<int32_t>(self, kObjectHeapOffset, CurrentHeap());
+    CurrentHeap() = -1;
+    SetField<void*>(self, kVtableOffsets[3], protore::EngineAddress(kVtablesBase[3]));
+    SetField<int32_t>(self, kRefCountOffset, 1);
+    SetField<void*>(self, kOwnerOffset, drive);
+    SetField<void*>(self, kRegistrationDriveOffset, registration_drive);
+    WriteVtables(self, kVtablesFinal);
+    SetField<void*>(self, kStreamOffset, stream);
+    SetField<int32_t>(self, kStateOffset, 0);
+    SetField<void*>(self, kEntriesOffset, nullptr);
+    SetField<void*>(self, kNextOffset, nullptr);
+    SetField<uint32_t>(self, kListIndexOffset, list_index);
+    SetField<void*>(self, kCompletionOffset, nullptr);
+    SetField<uint32_t>(self, kCompletionArgOffset, 0);
+    SetField<uint8_t>(self, kRevalidateOffset, preloaded != nullptr);
+    Engine<MarkerFn>(kConstructionMarkerRva)();
+    CallSlot(Field<void*>(self, kOwnerOffset), kSlotAddRef);
+    CallSlot(Field<void*>(self, kRegistrationDriveOffset), kSlotAddRef);
+    CallSlot(Field<void*>(self, kStreamOffset), kSlotAddRef);
+
+    void* load_interface = reinterpret_cast<uint8_t*>(self) + kLoadInterfaceOffset;
+    if (Field<uint8_t>(self, kRevalidateOffset)) {
+        memcpy(reinterpret_cast<uint8_t*>(self) + kHeaderOffset, preloaded->header, kHeaderSize);
+        SetField<void*>(self, kEntriesOffset, preloaded->entries);
+        SetField<uint32_t>(self, kDirectoryHeapOffset, preloaded->heap);
+        CallStream<StreamQueueFn>(Field<void*>(self, kStreamOffset), kStreamSlotQueue, load_interface,
+                                  kCementPhaseDirectory);
+    } else {
+        SetField<uint32_t>(self, kDirectoryHeapOffset, Field<uint32_t>(self, kObjectHeapOffset));
+        CallStream<StreamQueueFn>(Field<void*>(self, kStreamOffset), kStreamSlotQueue, load_interface,
+                                  kCementPhaseStart);
+    }
+    return self;
+}
+
+void __thiscall CementLibraryDestruct(CementLibrary* self) {
+    const int32_t state = Field<int32_t>(self, kStateOffset);
+    WriteVtables(self, kVtablesFinal);
+    if (state == 0) {
+        CallSlot(Field<void*>(self, kStreamOffset), kStreamSlotCancel);
+    } else if (state == kCementStateLoaded) {
+        if (Field<uint32_t>(self, kNeedsIoBufferOffset) != 0) {
+            auto* assert_enabled = static_cast<volatile uint8_t*>(protore::EngineAddress(kDestructorAssertFlagRva));
+            if (*assert_enabled &&
+                Field<void*>(self, kRegistrationDriveOffset) != Field<void*>(self, kOwnerOffset)) {
+                if (Engine<ReportFn>(kReportRva)(kReportAssert, " oldassert ",
+                                                 "..\\..\\..\\code\\core\\src\\file\\common\\cementer.cpp",
+                                                 kDestructorAssertLine, "m_pRegistrationDrive == m_pDrive",
+                                                 nullptr) == kReportDisableSite) {
+                    *assert_enabled = 0;
+                }
+            }
+            IoBufferHolder* holder =
+                Engine<HolderOfDriveFn>(kHolderOfDriveRva)(Field<void*>(self, kRegistrationDriveOffset));
+            Engine<ReleaseBufferFn>(kReleaseBufferRva)(holder);
+        }
+        Engine<UnregisterLibraryFn>(kUnregisterLibraryRva)(Field<void*>(self, kRegistrationDriveOffset), self);
+    }
+    CallSlot(Field<void*>(self, kStreamOffset), kSlotRelease);
+    void* drive = Field<void*>(self, kOwnerOffset);
+    SetField<void*>(self, kStreamOffset, nullptr);
+    CallSlot(drive, kSlotRelease);
+    void* registration_drive = Field<void*>(self, kRegistrationDriveOffset);
+    SetField<void*>(self, kOwnerOffset, nullptr);
+    CallSlot(registration_drive, kSlotRelease);
+    void* entries = Field<void*>(self, kEntriesOffset);
+    SetField<void*>(self, kRegistrationDriveOffset, nullptr);
+    if (entries) {
+        Engine<HeapFreeFn>(kFreeRva)(Field<uint32_t>(self, kDirectoryHeapOffset), entries);
+    }
+    SetField<void*>(self, kVtableOffsets[3], protore::EngineAddress(kVtablesDestroyed[3]));
+    const int32_t heap = Field<int32_t>(self, kObjectHeapOffset);
+    SetField<void*>(self, kVtableOffsets[2], protore::EngineAddress(kVtablesDestroyed[2]));
+    CurrentHeap() = heap;
+    SetField<void*>(self, kVtableOffsets[1], protore::EngineAddress(kVtablesDestroyed[1]));
+    SetField<void*>(self, kVtableOffsets[0], protore::EngineAddress(kVtablesDestroyed[0]));
+}
+
+CementLibrary* __thiscall CementLibraryDeletingDestruct(CementLibrary* self, uint32_t flags) {
+    CementLibraryDestruct(self);
+    if (flags & 1) {
+        const int32_t heap = CurrentHeap();
+        if (heap != -1) {
+            Engine<HeapFreeFn>(kFreeObjectRva)(static_cast<uint32_t>(heap), self);
+        }
+        CurrentHeap() = -1;
+    }
+    return self;
+}
+
+uint32_t __thiscall CementLibraryAddRef(CementLibrary* self) {
+    void* lock = reinterpret_cast<uint8_t*>(self) + kRefCountLockOffset;
+    CallSlot(lock, 0);
+    SetField<int32_t>(self, kRefCountOffset, Field<int32_t>(self, kRefCountOffset) + 1);
+    return Slot<WordMethodFn>(lock, 1)(lock);
+}
+
+uint32_t __thiscall CementLibraryRelease(CementLibrary* self) {
+    void* lock = reinterpret_cast<uint8_t*>(self) + kRefCountLockOffset;
+    CallSlot(lock, 0);
+    const int32_t count = Field<int32_t>(self, kRefCountOffset) - 1;
+    SetField<int32_t>(self, kRefCountOffset, count);
+    if (count != 0) {
+        return Slot<WordMethodFn>(lock, 1)(lock);
+    }
+    SetField<int32_t>(self, kRefCountOffset, kReleasedRefCount);
+    CallSlot(lock, 1);
+    return Slot<DeletingFn>(lock, kSlotDeletingDestructor)(lock, 1);
+}
+
+// ---- small methods ------------------------------------------------------------------------------------------
+
+void __thiscall CementLibraryWaitUntilSettled(CementLibrary* self) {
+    while (Field<int32_t>(self, kStateOffset) == 0) {
+        Engine<PumpFn>(kFileSystemPumpRva)();
+        Engine<SleepFn>(kThreadSleepRva)(0);
+    }
+}
+
+uint32_t __thiscall CementLibraryIsLoaded(CementLibrary* self) {
+    return Field<int32_t>(self, kStateOffset) == kCementStateLoaded ? 1 : 0;
+}
+
+void __thiscall CementLibrarySetCompletion(CementLibrary* self, void* completion, uint32_t argument) {
+    SetField<uint32_t>(self, kCompletionArgOffset, argument);
+    SetField<void*>(self, kCompletionOffset, completion);
+    CallSlot(completion, 0);
+}
+
+// Same instruction shape as the originals: no frame, so whatever arguments the caller pushed stay in place for the
+// target slot.
+asm(".globl _CementLibraryForwardSlot0\n"
+    "_CementLibraryForwardSlot0:\n\t"
+    "movl 0x10(%ecx), %ecx\n\t"
+    "movl 0x4(%ecx), %eax\n\t"
+    "movl (%eax), %edx\n\t"
+    "addl $4, %ecx\n\t"
+    "jmp *%edx\n"
+    ".globl _CementLibraryForwardSlot1\n"
+    "_CementLibraryForwardSlot1:\n\t"
+    "movl 0x10(%ecx), %ecx\n\t"
+    "movl 0x4(%ecx), %eax\n\t"
+    "movl 0x4(%eax), %edx\n\t"
+    "addl $4, %ecx\n\t"
+    "jmp *%edx\n");
+
+// ---- open by key --------------------------------------------------------------------------------------------
+
+namespace {
+
+constexpr uint32_t kSprintfImportRva = 0x01331fd4;   // IAT slot of MSVCR80!sprintf
+constexpr uint32_t kNewFileRva = 0x0064e050;         // cdecl(size): allocates a core::File
+constexpr uint32_t kFileConstructRva = 0x0064e9e0;   // thiscall, 10 arguments
+constexpr uint32_t kNewRequestRva = 0x0064c4e0;      // cdecl(size): allocates a drive request
+constexpr uint32_t kOpenByKeyRequestRva = 0x0064d810;  // thiscall(file, key, library)
+constexpr uint32_t kQueueRequestRva = 0x0064feb0;    // thiscall(drive, request, a3, 0)
+constexpr uint32_t kFileSize = 0x174;
+constexpr uint32_t kRequestSize = 0x14;
+constexpr int kSlotOpenByKey = 7;                    // vtable +0x1c
+constexpr int kFileSlotAfterOpen = 21;               // vtable +0x54
+
+using SprintfFn = int(__cdecl*)(char*, const char*, ...);
+using NewFn = void*(__cdecl*)(uint32_t);
+using FileConstructFn = File*(__thiscall*)(void* memory, void* drive, const char* name, uint32_t, uint32_t,
+                                           uint32_t a3, uint32_t a4, uint32_t a5, uint32_t a6, uint32_t, uint32_t);
+using RequestConstructFn = void*(__thiscall*)(void* memory, File* file, uint32_t key, CementLibrary* library);
+using QueueFn = void(__thiscall*)(void* drive, void* request, uint32_t a3, uint32_t zero);
+using OpenByKeyFn = void(__thiscall*)(CementLibrary*, File**, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
+
+}  // namespace
+
+void __thiscall CementLibraryOpenByKey(CementLibrary* self, File** out, uint32_t key, uint32_t a3, uint32_t a4,
+                                       uint32_t a5, uint32_t a6) {
+    char name[16];
+    (*static_cast<SprintfFn*>(protore::EngineAddress(kSprintfImportRva)))(name, "0x%X", key);
+    File* file = nullptr;
+    if (void* memory = Engine<NewFn>(kNewFileRva)(kFileSize)) {
+        file = Engine<FileConstructFn>(kFileConstructRva)(memory, Field<void*>(self, kOwnerOffset), name, 0, 0, a3,
+                                                          a4, a5, a6, 0, 0);
+    }
+    *out = file;
+    void* request = nullptr;
+    if (void* memory = Engine<NewFn>(kNewRequestRva)(kRequestSize)) {
+        request = Engine<RequestConstructFn>(kOpenByKeyRequestRva)(memory, file, key, self);
+    }
+    Engine<QueueFn>(kQueueRequestRva)(Field<void*>(self, kOwnerOffset), request, a3, 0);
+}
+
+void __thiscall CementLibraryOpenByKeyAndWait(CementLibrary* self, File** out, uint32_t key, uint32_t a3, uint32_t a4,
+                                              uint32_t a5, uint32_t a6) {
+    Slot<OpenByKeyFn>(self, kSlotOpenByKey)(self, out, key, a3, a4, a5, a6);
+    if (File* file = *out) {
+        CallSlot(file, kFileSlotAfterOpen);
+    }
+}
+
 const void* CementFindEntry(const void* entries, uint32_t count, uint32_t key, uint32_t stride) {
     if (count == 0) {
         return nullptr;

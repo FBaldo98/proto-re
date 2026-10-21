@@ -17,6 +17,13 @@ static_assert(sizeof(HeapRecord) == 16, "heap record is 16 bytes");
 // 0x01277f90), calls handler(context, heap, size, alignment, null) before returning null.
 void* Alloc(uint32_t heap, uint32_t size, uint32_t alignment);
 
+// Original: FUN_1063a9c0 (rva 0x0063a9c0), cdecl. Returns memory from Alloc to heap `heap` (allocator slot 6).
+void Free(uint32_t heap, void* p);
+
+// Original: FUN_1063a9a0 (rva 0x0063a9a0), cdecl. Releases an object allocated from heap `heap` (allocator slot 4);
+// used by deleting destructors.
+void FreeObject(uint32_t heap, void* p);
+
 // Original: FUN_10645300 (rva 0x00645300), cdecl. Rounds `value` up to a multiple of `granularity`; returns `value`
 // unchanged when granularity is 0 or value is already a multiple.
 uint32_t RoundUp(uint32_t value, uint32_t granularity);

@@ -24,8 +24,10 @@ struct Detour {
     void* trampoline = nullptr;  // stolen bytes + JMP back to target + stolen_len
 };
 
+// `rel32_at`: offset inside the stolen bytes of a CALL/JMP rel32 (E8/E9) whose displacement must be re-based
+// when copied into the trampoline; -1 when the stolen instructions contain none.
 bool DetourAttach(Detour* d, uint32_t rva, size_t stolen_len, const uint8_t* expected, size_t expected_len,
-                  void* replacement);
+                  void* replacement, int rel32_at = -1);
 void DetourDetach(Detour* d);
 
 struct Hook {
@@ -37,6 +39,7 @@ struct Hook {
     size_t stolen_len;       // bytes moved into the trampoline (instruction boundary, >= 5)
     bool enabled;            // disabled hooks stay in the table for differential testing
     Detour detour;           // filled by InstallHooks
+    int rel32_at = -1;       // see DetourAttach
 };
 
 // Returns pointer to a location in the loaded engine. For a function this is its live entry point: calls through
@@ -54,7 +57,8 @@ int InstallHooks(Hook* hooks, size_t count);
 // hook is installed there (the hook is suspended and restored afterwards).
 class TestDetour {
 public:
-    TestDetour(uint32_t rva, size_t stolen_len, const uint8_t* expected, size_t expected_len, void* replacement);
+    TestDetour(uint32_t rva, size_t stolen_len, const uint8_t* expected, size_t expected_len, void* replacement,
+               int rel32_at = -1);
     ~TestDetour();
     TestDetour(const TestDetour&) = delete;
     TestDetour& operator=(const TestDetour&) = delete;

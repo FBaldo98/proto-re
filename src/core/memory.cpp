@@ -11,9 +11,12 @@ constexpr uint32_t kOomHandlerRva = 0x01277f8c;  // OomHandlerFn, may be null
 constexpr uint32_t kOomContextRva = 0x01277f90;  // first argument passed to the handler
 
 constexpr uint32_t kMinAlignment = 4;
-constexpr int kAllocatorSlotAllocate = 5;  // vtable +0x14
+constexpr int kAllocatorSlotFreeObject = 4;  // vtable +0x10
+constexpr int kAllocatorSlotAllocate = 5;    // vtable +0x14
+constexpr int kAllocatorSlotFree = 6;        // vtable +0x18
 
 using AllocateFn = void*(__thiscall*)(void* allocator, uint32_t size, uint32_t alignment);
+using ReleaseFn = void(__thiscall*)(void* allocator, void* p);
 using OomHandlerFn = void(__cdecl*)(uint32_t context, uint32_t heap, uint32_t size, uint32_t alignment, void* result);
 
 template <typename T>
@@ -36,6 +39,24 @@ void* Alloc(uint32_t heap, uint32_t size, uint32_t alignment) {
         }
     }
     return result;
+}
+
+namespace {
+
+void CallRelease(uint32_t heap, void* p, int slot) {
+    void* allocator = Global<HeapRecord*>(kHeapTableRva)[heap].allocator;
+    void** vtable = *static_cast<void***>(allocator);
+    reinterpret_cast<ReleaseFn>(vtable[slot])(allocator, p);
+}
+
+}  // namespace
+
+void Free(uint32_t heap, void* p) {
+    CallRelease(heap, p, kAllocatorSlotFree);
+}
+
+void FreeObject(uint32_t heap, void* p) {
+    CallRelease(heap, p, kAllocatorSlotFreeObject);
 }
 
 uint32_t RoundUp(uint32_t value, uint32_t granularity) {

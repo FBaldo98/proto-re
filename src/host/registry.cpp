@@ -2,6 +2,7 @@
 
 #include "../core/file_system.h"
 #include "../core/memory.h"
+#include "../core/mutex.h"
 #include "../core/cement_file_range.h"
 #include "../core/cement_library.h"
 #include "../core/name_hash.h"
@@ -60,6 +61,73 @@ Hook g_hooks[] = {
     // push esi; mov esi,ecx; cmp dword ptr [esi+20h],1
     {"core::CementLibraryLoadStep", 0x006508e0, reinterpret_cast<void*>(&core::CementLibraryLoadStep),
      {0x56, 0x8b, 0xf1, 0x83, 0x7e, 0x20, 0x01}, 7, 7, true, {}},
+
+    // ---- platform wrappers: mov eax,[esp+4]; push eax; call [import] ----
+    {"core::MutexInit", 0x0063d260, reinterpret_cast<void*>(&core::MutexInit),
+     {0x8b, 0x44, 0x24, 0x04, 0x50, 0xff, 0x15}, 7, 5, true, {}},
+    {"core::MutexDestroy", 0x0063d270, reinterpret_cast<void*>(&core::MutexDestroy),
+     {0x8b, 0x44, 0x24, 0x04, 0x50, 0xff, 0x15}, 7, 5, true, {}},
+    {"core::MutexUnlock", 0x0063d280, reinterpret_cast<void*>(&core::MutexUnlock),
+     {0x8b, 0x44, 0x24, 0x04, 0x50, 0xff, 0x15}, 7, 5, true, {}},
+    {"core::MutexLock", 0x0063d290, reinterpret_cast<void*>(&core::MutexLock),
+     {0x8b, 0x44, 0x24, 0x04, 0x50, 0xff, 0x15}, 7, 5, true, {}},
+    {"core::ThreadSleep", 0x00644b40, reinterpret_cast<void*>(&core::ThreadSleep),
+     {0x8b, 0x44, 0x24, 0x04, 0x50, 0xff, 0x15}, 7, 5, true, {}},
+    // mov eax,[esp+4]; mov ecx,[110BC5A4h]
+    {"core::Free", 0x0063a9c0, reinterpret_cast<void*>(&core::Free),
+     {0x8b, 0x44, 0x24, 0x04, 0x8b, 0x0d, 0xa4, 0xc5, 0x0b, 0x11}, 10, 10, true, {}},
+    {"core::FreeObject", 0x0063a9a0, reinterpret_cast<void*>(&core::FreeObject),
+     {0x8b, 0x44, 0x24, 0x04, 0x8b, 0x0d, 0xa4, 0xc5, 0x0b, 0x11}, 10, 10, true, {}},
+
+    // ---- IoBufferHolder ----
+    {"core::IoBufferHolderInit", 0x00650b60, reinterpret_cast<void*>(&core::IoBufferHolderInit),
+     {0x56, 0x8b, 0xf1, 0x57, 0x33, 0xff}, 6, 6, true, {}},
+    {"core::IoBufferHolderReleaseLibraries", 0x00650540,
+     reinterpret_cast<void*>(&core::IoBufferHolderReleaseLibraries),
+     {0x53, 0x56, 0x57, 0x8b, 0xd9, 0x33, 0xff}, 7, 7, true, {}},
+    {"core::IoBufferHolderRegister", 0x00650580, reinterpret_cast<void*>(&core::IoBufferHolderRegister),
+     {0x56, 0x8b, 0xf1, 0x57, 0x8d, 0x7e, 0x14}, 7, 7, true, {}},
+    {"core::IoBufferHolderUnregister", 0x006505d0, reinterpret_cast<void*>(&core::IoBufferHolderUnregister),
+     {0x53, 0x55, 0x57, 0x8b, 0xf9, 0x8d, 0x6f, 0x14}, 8, 5, true, {}},
+    {"core::IoBufferHolderBeginIteration", 0x00650640,
+     reinterpret_cast<void*>(&core::IoBufferHolderBeginIteration),
+     {0x56, 0x8b, 0xf1, 0x8d, 0x46, 0x14}, 6, 6, true, {}},
+    {"core::IoBufferHolderNext", 0x00650660, reinterpret_cast<void*>(&core::IoBufferHolderNext),
+     {0x8b, 0x41, 0x10, 0x85, 0xc0, 0x74, 0x06}, 7, 5, true, {}},
+    {"core::IoBufferHolderEndIteration", 0x00650670, reinterpret_cast<void*>(&core::IoBufferHolderEndIteration),
+     {0xc7, 0x41, 0x10, 0x00, 0x00, 0x00, 0x00}, 7, 7, true, {}},
+    {"core::IoBufferHolderReleaseBuffer", 0x006506f0, reinterpret_cast<void*>(&core::IoBufferHolderReleaseBuffer),
+     {0x56, 0x8b, 0xf1, 0x83, 0x7e, 0x34, 0x01}, 7, 7, true, {}},
+
+    // ---- CementLibrary: remaining methods ----
+    {"core::CementLibraryForwardSlot0", 0x00650330, reinterpret_cast<void*>(&core::CementLibraryForwardSlot0),
+     {0x8b, 0x49, 0x10, 0x8b, 0x41, 0x04, 0x8b, 0x10}, 8, 6, true, {}},
+    {"core::CementLibraryForwardSlot1", 0x00650340, reinterpret_cast<void*>(&core::CementLibraryForwardSlot1),
+     {0x8b, 0x49, 0x10, 0x8b, 0x41, 0x04, 0x8b, 0x50, 0x04}, 9, 6, true, {}},
+    {"core::CementLibraryWaitUntilSettled", 0x00650360,
+     reinterpret_cast<void*>(&core::CementLibraryWaitUntilSettled),
+     {0x56, 0x8b, 0xf1, 0x83, 0x7e, 0x24, 0x00}, 7, 7, true, {}},
+    {"core::CementLibraryIsLoaded", 0x00650390, reinterpret_cast<void*>(&core::CementLibraryIsLoaded),
+     {0x33, 0xc0, 0x83, 0x79, 0x24, 0x01}, 6, 6, true, {}},
+    {"core::CementLibrarySetCompletion", 0x006503a0, reinterpret_cast<void*>(&core::CementLibrarySetCompletion),
+     {0x8b, 0x54, 0x24, 0x08, 0x8b, 0xc1}, 6, 6, true, {}},
+    {"core::CementLibraryAddRef", 0x00650830, reinterpret_cast<void*>(&core::CementLibraryAddRef),
+     {0x8b, 0x41, 0x10, 0x8b, 0x10, 0x56, 0x8d, 0x71, 0x10}, 9, 5, true, {}},
+    {"core::CementLibraryRelease", 0x00650850, reinterpret_cast<void*>(&core::CementLibraryRelease),
+     {0x8b, 0x41, 0x10, 0x8b, 0x10, 0x56, 0x8d, 0x71, 0x10}, 9, 5, true, {}},
+    {"core::CementLibraryOpenByKey", 0x00650460, reinterpret_cast<void*>(&core::CementLibraryOpenByKey),
+     {0x83, 0xec, 0x10, 0x53, 0x8b, 0x5c, 0x24, 0x1c}, 8, 8, true, {}},
+    {"core::CementLibraryOpenByKeyAndWait", 0x00650500,
+     reinterpret_cast<void*>(&core::CementLibraryOpenByKeyAndWait),
+     {0x8b, 0x54, 0x24, 0x18, 0x8b, 0x01}, 6, 6, true, {}},
+    {"core::CementLibraryConstruct", 0x00650ba0, reinterpret_cast<void*>(&core::CementLibraryConstruct),
+     {0x8b, 0x54, 0x24, 0x14, 0x53, 0x55}, 6, 5, true, {}},
+    {"core::CementLibraryDestruct", 0x00650730, reinterpret_cast<void*>(&core::CementLibraryDestruct),
+     {0x53, 0x56, 0x8b, 0xf1, 0x8b, 0x46, 0x24}, 7, 7, true, {}},
+    // push esi; mov esi,ecx; call CementLibraryDestruct (rel32 at offset 3, re-based in the trampoline)
+    {"core::CementLibraryDeletingDestruct", 0x00650cb0,
+     reinterpret_cast<void*>(&core::CementLibraryDeletingDestruct),
+     {0x56, 0x8b, 0xf1, 0xe8, 0x78, 0xfa, 0xff, 0xff}, 8, 8, true, {}, 3},
 };
 
 }  // namespace
