@@ -12,5 +12,6 @@ const protore::DiffTest* All(size_t* count);
 void TestReport(protore::DiffResult* r);
 void TestTraceVector(protore::DiffResult* r);
 void TestNameHash(protore::DiffResult* r);
+void TestCementLookup(protore::DiffResult* r);
 
 }  // namespace tests

@@ -1,5 +1,6 @@
 #include "registry.h"
 
+#include "../core/cement_library.h"
 #include "../core/name_hash.h"
 #include "../core/report.h"
 #include "../math/vector_trace.h"
@@ -23,6 +24,15 @@ Hook g_hooks[] = {
     // mov eax,[esp+4]; cmp byte ptr [eax],5Ch
     {"core::HashFileName", 0x00643ed0, reinterpret_cast<void*>(&core::HashFileName),
      {0x8b, 0x44, 0x24, 0x04, 0x80, 0x38, 0x5c, 0x75, 0x03}, 9, 7, true, {}},
+    // push ecx; mov ecx,[esp+0Ch]
+    {"core::CementFindEntry", 0x006502c0, reinterpret_cast<void*>(&core::CementFindEntry),
+     {0x51, 0x8b, 0x4c, 0x24, 0x0c, 0x33, 0xc0}, 7, 5, true, {}},
+    // push ecx; push edi; mov edi,ecx; cmp dword ptr [edi+24h],1
+    {"core::CementLibraryFindAndOpen", 0x00650ab0, reinterpret_cast<void*>(&core::CementLibraryFindAndOpen),
+     {0x51, 0x57, 0x8b, 0xf9, 0x83, 0x7f, 0x24, 0x01}, 8, 8, true, {}},
+    // mov eax,[esp+4]; cmp byte ptr [eax],5Ch
+    {"core::CementLibraryOpenByName", 0x00650cf0, reinterpret_cast<void*>(&core::CementLibraryOpenByName),
+     {0x8b, 0x44, 0x24, 0x04, 0x80, 0x38, 0x5c, 0x56}, 8, 7, true, {}},
 };
 
 }  // namespace

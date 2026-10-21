@@ -8,6 +8,7 @@ const protore::DiffTest g_tests[] = {
     {"core::Report", &TestReport},
     {"math::TraceVector", &TestTraceVector},
     {"core::HashString/HashFileName", &TestNameHash},
+    {"core::CementLibrary lookup", &TestCementLookup},
 };
 
 }  // namespace
