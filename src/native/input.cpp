@@ -105,6 +105,9 @@ void Mouse(uint32_t msg, uint32_t wparam, uint32_t lparam) {
     if (g_mouse_service) GuestCall(g_mouse_service, {msg, wparam, lparam});
 }
 
+// Keys held by InjectKey (test scripts): SDL's own keyboard state only follows real devices.
+bool g_injected[SDL_NUM_SCANCODES];
+
 // Relative mouse motion since the last DirectInput read (dinput.cpp).
 std::atomic<int32_t> g_mouse_dx{0}, g_mouse_dy{0}, g_mouse_dz{0};
 
@@ -121,7 +124,7 @@ std::vector<uint8_t> KeyboardDiks() {
 bool DikDown(uint8_t dik) {
     const Uint8* state = SDL_GetKeyboardState(nullptr);
     for (const KeyMap& k : kKeys) {
-        if (uint8_t(k.scan | (k.extended ? 0x80 : 0)) == dik && state[k.sdl]) return true;
+        if (uint8_t(k.scan | (k.extended ? 0x80 : 0)) == dik && (state[k.sdl] || g_injected[k.sdl])) return true;
     }
     return false;
 }
@@ -192,6 +195,15 @@ void ForwardInput(const SDL_Event& e) {
         default:
             break;
     }
+}
+
+// Presses or releases a key as if it came from the keyboard: window message and DirectInput state.
+void InjectKey(SDL_Scancode sc, bool down) {
+    g_injected[sc] = down;
+    SDL_Event e{};
+    e.type = down ? SDL_KEYDOWN : SDL_KEYUP;
+    e.key.keysym.scancode = sc;
+    ForwardInput(e);
 }
 
 }  // namespace native

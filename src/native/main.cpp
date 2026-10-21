@@ -13,6 +13,7 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include "guest.h"
 #include "win.h"
@@ -56,6 +57,7 @@ uint32_t HostWindow();  // user32.cpp
 void InitD3D9Bridge();  // d3d9.cpp
 void InitInput(uint32_t keyboard_service, uint32_t mouse_service);  // input.cpp
 void ForwardInput(const SDL_Event& e);
+void InjectKey(SDL_Scancode sc, bool down);
 extern SDL_Window* g_sdl_window;
 
 }  // namespace native
@@ -108,7 +110,30 @@ int main(int argc, char** argv) {
 
     InitInput(FindExport(g_engine, "EngineKeyboardService"), FindExport(g_engine, "EngineMouseService"));
     bool focused = true;
+    // PROTORE_INPUT="<frame>:<SDL key name>,...": taps a key at that frame (held for 5 frames), for scripted tests.
+    struct Tap {
+        uint64_t frame;
+        SDL_Scancode key;
+    };
+    std::vector<Tap> taps;
+    if (const char* spec = getenv("PROTORE_INPUT")) {
+        std::string all(spec);
+        for (size_t pos = 0; pos < all.size();) {
+            size_t end = all.find(',', pos);
+            std::string item = all.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
+            size_t colon = item.find(':');
+            if (colon != std::string::npos) {
+                taps.push_back({strtoull(item.c_str(), nullptr, 10), SDL_GetScancodeFromName(item.c_str() + colon + 1)});
+            }
+            pos = end == std::string::npos ? all.size() : end + 1;
+        }
+    }
     for (uint64_t frame = 0;; ++frame) {
+        for (const Tap& t : taps) {
+            if (t.key == SDL_SCANCODE_UNKNOWN) continue;
+            if (frame == t.frame) InjectKey(t.key, true);
+            if (frame == t.frame + 5) InjectKey(t.key, false);
+        }
         if ((frame & (frame - 1)) == 0) Log("frame %llu", (unsigned long long)frame);
         bool quit = false;
         SDL_Event e;
