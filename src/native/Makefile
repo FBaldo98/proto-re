@@ -16,7 +16,7 @@ RECOMP_CFLAGS := -std=c11 -O1 -g0 -fno-strict-aliasing -fwrapv -fno-delete-null-
 LDFLAGS := -pthread -L$(DXVK_LIB) -Wl,-rpath,$(DXVK_LIB) -ldxvk_d3d9 -lSDL2
 
 SRCS := main.cpp memory.cpp loader.cpp imports.cpp runtime.cpp thread.cpp kernel32.cpp msvcr80.cpp user32.cpp \
-        advapi32.cpp misc.cpp d3d9.cpp
+        advapi32.cpp misc.cpp d3d9.cpp input.cpp
 GEN := $(wildcard $(RECOMP_DIR)/*.c)
 OBJS = $(SRCS:%.cpp=$(OUT)/%.o) $(GEN:$(RECOMP_DIR)/%.c=$(OUT)/gen/%.o)
 

@@ -3,8 +3,9 @@
 callbacks) or from instruction immediates (`push offset callback`). Writes re/extra_functions.txt, read by recomp.py.
 
 A candidate is a 4-byte value anywhere in the image that points into .text, outside every known function body,
-and looks like a function start (16-byte aligned, or preceded by int3/ret/nop padding). False positives only cost
-some dead recompiled code: nothing calls them."""
+and looks like a function start (16-byte aligned, preceded by int3/ret/nop padding, or a `jmp rel32` thunk of the
+incremental-linking table, whose target is added too). False positives only cost some dead recompiled code: nothing
+calls them."""
 import bisect
 import os
 import sys
@@ -37,10 +38,19 @@ def main():
         i = bisect.bisect_right(starts, v) - 1
         return i >= 0 and v < ends[starts[i]]
 
+    def jmp_target(v):
+        off = v - lo
+        if code[off] != 0xE9:
+            return None
+        t = (v + 5 + int.from_bytes(code[off + 1:off + 5], "little", signed=True)) & 0xFFFFFFFF
+        return t if lo <= t < hi else None
+
     def looks_like_start(v):
         off = v - lo
         if code[off] in (0xCC, 0x00):
             return False
+        if jmp_target(v):  # incremental-linking thunk table: back-to-back `jmp rel32`
+            return True
         return v % 16 == 0 or code[off - 1] in (0xCC, 0xC3, 0x90) or code[off - 3] == 0xC2
 
     found = set()
@@ -51,6 +61,11 @@ def main():
             v = int.from_bytes(data[o:o + 4], "little")
             if lo <= v < hi and v not in ends and not inside(v) and looks_like_start(v):
                 found.add(v)
+    # Thunk targets: the real function, often never referenced by anything else.
+    for v in list(found) + starts:
+        t = jmp_target(v)
+        if t and t not in ends and not inside(t):
+            found.add(t)
     out = os.path.join(ROOT, "re", "extra_functions.txt")
     with open(out, "w") as f:
         f.write("# Function entries missing from functions.csv (tools/recomp/data_entries.py)\n")

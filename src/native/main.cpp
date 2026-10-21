@@ -54,6 +54,8 @@ void Fatal(const char* fmt, ...) {
 
 uint32_t HostWindow();  // user32.cpp
 void InitD3D9Bridge();  // d3d9.cpp
+void InitInput(uint32_t keyboard_service, uint32_t mouse_service);  // input.cpp
+void ForwardInput(const SDL_Event& e);
 extern SDL_Window* g_sdl_window;
 
 }  // namespace native
@@ -104,15 +106,24 @@ int main(int argc, char** argv) {
     Log("EngineInitialize returned %u", r);
     if (!r) return 1;
 
+    InitInput(FindExport(g_engine, "EngineKeyboardService"), FindExport(g_engine, "EngineMouseService"));
+    bool focused = true;
     for (uint64_t frame = 0;; ++frame) {
         if ((frame & (frame - 1)) == 0) Log("frame %llu", (unsigned long long)frame);
         bool quit = false;
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
-            if (e.type == SDL_QUIT) quit = true;
+            if (e.type == SDL_QUIT) {
+                quit = true;
+            } else if (e.type == SDL_WINDOWEVENT) {
+                if (e.window.event == SDL_WINDOWEVENT_FOCUS_GAINED) focused = true;
+                if (e.window.event == SDL_WINDOWEVENT_FOCUS_LOST) focused = false;
+            } else {
+                ForwardInput(e);
+            }
         }
-        bool keep = (GuestCall(service, {quit ? 1u : 0u, 0}) & 0xff) != 0;
-        GuestCall(focus, {1});
+        bool keep = (GuestCall(service, {quit ? 1u : 0u, focused ? 0u : 1u}) & 0xff) != 0;
+        GuestCall(focus, {focused ? 1u : 0u});
         if (!keep) break;
     }
     GuestCall(terminate, {});
