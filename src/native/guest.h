@@ -94,8 +94,14 @@ struct ImportRegistrar {
 struct LoadedImage {
     uint32_t base, size, entry;
 };
-// Maps a PE32 image at its preferred base, resolving imports to thunks. Returns false when the file is unusable.
-bool LoadImage(const char* path, LoadedImage* out);
+// Maps a PE32 image at `load_base` (0: its preferred base; otherwise base relocations are applied), resolving
+// imports to thunks. Returns false when the file is unusable.
+bool LoadImage(const char* path, LoadedImage* out, uint32_t load_base = 0);
+// Where the native host loads the engine. Not its preferred 0x10000000: on Android ART's heap lives there. The
+// recompiled code must be generated for the same address (recomp.py --base 0x58000000); below 2 GiB because the
+// game is not large-address aware.
+constexpr uint32_t kEngineBase = 0x58000000u;
+constexpr uint32_t kEngineReserve = 0x02000000u;  // address space kept out of the arena for the image
 uint32_t FindExport(const LoadedImage& image, const char* name);
 
 // Address range of the engine image (thunk following in the dispatcher).

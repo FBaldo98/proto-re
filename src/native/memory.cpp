@@ -1,7 +1,7 @@
 // Guest address space: the low 4 GiB of the host process.
 //
-//   0x0f000000  import thunks (imports.cpp)
-//   0x10000000  engine image (preferred base, no relocation needed)
+//   import thunks: an arena block (imports.cpp)
+//   kEngineBase (guest.h) engine image, rebased; kept out of the arena
 //   0x12000000 .. 0xf0000000  arena: VirtualAlloc pages, guest heap, stacks, TEBs
 //
 // The arena is mapped read/write with MAP_NORESERVE once; the kernel commits pages on first touch, which matches
@@ -113,11 +113,15 @@ void InitGuestMemory() {
         char line[512];
         while (fgets(line, sizeof(line), maps)) {
             unsigned long long lo, hi;
-            if (sscanf(line, "%llx-%llx", &lo, &hi) != 2 || lo >= kArenaHi || hi <= kArenaLo) continue;
+            if (sscanf(line, "%llx-%llx", &lo, &hi) != 2 || lo >= kArenaHi || hi <= 0x10000000u) continue;
             taken[lo & ~uint64_t(kPage - 1)] = (hi + kPage - 1) & ~uint64_t(kPage - 1);
+#ifdef __ANDROID__
+            Log("memory: below 4 GiB: %.120s", line);
+#endif
         }
         fclose(maps);
     }
+    taken[kEngineBase] = uint64_t(kEngineBase) + kEngineReserve;
     uint64_t cursor = kArenaLo, total = 0;
     auto reserve = [&](uint64_t lo, uint64_t hi) {
         if (hi <= lo) return;

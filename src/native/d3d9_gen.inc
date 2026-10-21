@@ -6,9 +6,12 @@ static void h_IDirect3D9_Release(Ctx* c) { ReleaseImpl<IDirect3D9>(c); }
 static void h_IDirect3D9_RegisterSoftwareDevice(Ctx* c) { auto r = Host<IDirect3D9>(Arg(c, 0))->RegisterSoftwareDevice(Ptr<void>(Arg(c, 1)));  Return(c, (uint32_t)r, 2); }
 static void h_IDirect3D9_GetAdapterCount(Ctx* c) { auto r = Host<IDirect3D9>(Arg(c, 0))->GetAdapterCount();  Return(c, (uint32_t)r, 1); }
 static void h_IDirect3D9_GetAdapterIdentifier(Ctx* c) { auto r = Host<IDirect3D9>(Arg(c, 0))->GetAdapterIdentifier((UINT)Arg(c, 1), (DWORD)Arg(c, 2), reinterpret_cast<D3DADAPTER_IDENTIFIER9*>(Ptr<void>(Arg(c, 3))));  Return(c, (uint32_t)r, 4); }
-static void h_IDirect3D9_GetAdapterModeCount(Ctx* c) { auto r = Host<IDirect3D9>(Arg(c, 0))->GetAdapterModeCount((UINT)Arg(c, 1), (D3DFORMAT)Arg(c, 2));  Return(c, (uint32_t)r, 3); }
-static void h_IDirect3D9_EnumAdapterModes(Ctx* c) { auto r = Host<IDirect3D9>(Arg(c, 0))->EnumAdapterModes((UINT)Arg(c, 1), (D3DFORMAT)Arg(c, 2), (UINT)Arg(c, 3), reinterpret_cast<D3DDISPLAYMODE*>(Ptr<void>(Arg(c, 4))));  Return(c, (uint32_t)r, 5); }
-static void h_IDirect3D9_GetAdapterDisplayMode(Ctx* c) { auto r = Host<IDirect3D9>(Arg(c, 0))->GetAdapterDisplayMode((UINT)Arg(c, 1), reinterpret_cast<D3DDISPLAYMODE*>(Ptr<void>(Arg(c, 2))));  Return(c, (uint32_t)r, 3); }
+void Manual_IDirect3D9_GetAdapterModeCount(Ctx* c);
+static void h_IDirect3D9_GetAdapterModeCount(Ctx* c) { Manual_IDirect3D9_GetAdapterModeCount(c); }
+void Manual_IDirect3D9_EnumAdapterModes(Ctx* c);
+static void h_IDirect3D9_EnumAdapterModes(Ctx* c) { Manual_IDirect3D9_EnumAdapterModes(c); }
+void Manual_IDirect3D9_GetAdapterDisplayMode(Ctx* c);
+static void h_IDirect3D9_GetAdapterDisplayMode(Ctx* c) { Manual_IDirect3D9_GetAdapterDisplayMode(c); }
 static void h_IDirect3D9_CheckDeviceType(Ctx* c) { auto r = Host<IDirect3D9>(Arg(c, 0))->CheckDeviceType((UINT)Arg(c, 1), (D3DDEVTYPE)Arg(c, 2), (D3DFORMAT)Arg(c, 3), (D3DFORMAT)Arg(c, 4), (WINBOOL)Arg(c, 5));  Return(c, (uint32_t)r, 6); }
 void Manual_IDirect3D9_CheckDeviceFormat(Ctx* c);
 static void h_IDirect3D9_CheckDeviceFormat(Ctx* c) { Manual_IDirect3D9_CheckDeviceFormat(c); }
@@ -48,7 +51,8 @@ static void h_IDirect3DDevice9_GetAvailableTextureMem(Ctx* c) { auto r = Host<ID
 static void h_IDirect3DDevice9_EvictManagedResources(Ctx* c) { auto r = Host<IDirect3DDevice9>(Arg(c, 0))->EvictManagedResources();  Return(c, (uint32_t)r, 1); }
 static void h_IDirect3DDevice9_GetDirect3D(Ctx* c) { IDirect3D9* out1 = nullptr; auto r = Host<IDirect3DDevice9>(Arg(c, 0))->GetDirect3D(Arg(c, 1) ? &out1 : nullptr); if (Arg(c, 1)) W32(Arg(c, 1), Wrap(out1)); Return(c, (uint32_t)r, 2); }
 static void h_IDirect3DDevice9_GetDeviceCaps(Ctx* c) { auto r = Host<IDirect3DDevice9>(Arg(c, 0))->GetDeviceCaps(reinterpret_cast<D3DCAPS9*>(Ptr<void>(Arg(c, 1))));  Return(c, (uint32_t)r, 2); }
-static void h_IDirect3DDevice9_GetDisplayMode(Ctx* c) { auto r = Host<IDirect3DDevice9>(Arg(c, 0))->GetDisplayMode((UINT)Arg(c, 1), reinterpret_cast<D3DDISPLAYMODE*>(Ptr<void>(Arg(c, 2))));  Return(c, (uint32_t)r, 3); }
+void Manual_IDirect3DDevice9_GetDisplayMode(Ctx* c);
+static void h_IDirect3DDevice9_GetDisplayMode(Ctx* c) { Manual_IDirect3DDevice9_GetDisplayMode(c); }
 void Manual_IDirect3DDevice9_GetCreationParameters(Ctx* c);
 static void h_IDirect3DDevice9_GetCreationParameters(Ctx* c) { Manual_IDirect3DDevice9_GetCreationParameters(c); }
 void Manual_IDirect3DDevice9_SetCursorProperties(Ctx* c);

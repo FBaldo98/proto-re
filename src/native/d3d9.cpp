@@ -21,6 +21,8 @@ namespace native {
 
 SDL_Window* g_sdl_window = nullptr;
 uint32_t HostWindow();
+void ClientSize(int* w, int* h);     // user32.cpp
+void SetClientSize(int w, int h);
 
 namespace {
 
@@ -494,6 +496,41 @@ void AdaptDesc(const TexAdapt& a, UINT level, D3DSURFACE_DESC* d) {
     d->Height = a.height >> level ? a.height >> level : 1;
 }
 
+
+// ---- display modes ----
+// With override_modes (default on Android) the engine sees modes of the render resolution instead of the screen's:
+// the render size (render_height) first, then 540p/720p/900p/1080p at the screen's aspect ratio. Its default
+// fullscreen choice, the back buffer and the window client area then agree, and touch coordinates map 1:1.
+bool OverrideModes() {
+#ifdef __ANDROID__
+    static const bool on = SettingInt("override_modes", 1) != 0;
+#else
+    static const bool on = SettingInt("override_modes", 0) != 0;
+#endif
+    return on;
+}
+
+std::vector<D3DDISPLAYMODE> Modes() {
+    static std::vector<D3DDISPLAYMODE> modes;
+    if (modes.empty()) {
+        int cw, ch;
+        ClientSize(&cw, &ch);
+        modes.push_back({UINT(cw), UINT(ch), 60, D3DFMT_X8R8G8B8});
+        for (UINT h : {540u, 720u, 900u, 1080u}) {
+            UINT w = (UINT(uint64_t(h) * UINT(cw) / UINT(ch)) + 4) & ~7u;
+            if (h != UINT(ch)) modes.push_back({w, h, 60, D3DFMT_X8R8G8B8});
+        }
+    }
+    return modes;
+}
+
+void WriteMode(uint32_t out, const D3DDISPLAYMODE& m) {
+    W32(out, m.Width);
+    W32(out + 4, m.Height);
+    W32(out + 8, m.RefreshRate);
+    W32(out + 12, uint32_t(m.Format));
+}
+
 // ---- Direct3DCreate9 ----
 void x_Direct3DCreate9(Ctx* c) {
     IDirect3D9* d3d = Direct3DCreate9(Arg(c, 0));
@@ -514,6 +551,55 @@ void x_Direct3DCreate9(Ctx* c) {
 #define M(iface, method) void Manual_##iface##_##method(Ctx* c)
 
 M(IDirect3D9, GetAdapterMonitor) { Return(c, 1, 2); }
+M(IDirect3D9, GetAdapterDisplayMode) {
+    // (this, Adapter, pMode)
+    if (!OverrideModes()) {
+        Return(c, uint32_t(Host<IDirect3D9>(Arg(c, 0))->GetAdapterDisplayMode(Arg(c, 1), Ptr<D3DDISPLAYMODE>(Arg(c, 2)))),
+               3);
+        return;
+    }
+    WriteMode(Arg(c, 2), Modes()[0]);
+    Return(c, D3D_OK, 3);
+}
+M(IDirect3D9, GetAdapterModeCount) {
+    // (this, Adapter, Format)
+    if (!OverrideModes()) {
+        Return(c, Host<IDirect3D9>(Arg(c, 0))->GetAdapterModeCount(Arg(c, 1), D3DFORMAT(Arg(c, 2))), 3);
+        return;
+    }
+    D3DFORMAT f = D3DFORMAT(Arg(c, 2));
+    Return(c, f == D3DFMT_X8R8G8B8 || f == D3DFMT_A8R8G8B8 ? uint32_t(Modes().size()) : 0u, 3);
+}
+M(IDirect3D9, EnumAdapterModes) {
+    // (this, Adapter, Format, Mode, pMode)
+    if (!OverrideModes()) {
+        Return(c, uint32_t(Host<IDirect3D9>(Arg(c, 0))->EnumAdapterModes(Arg(c, 1), D3DFORMAT(Arg(c, 2)), Arg(c, 3),
+                                                                        Ptr<D3DDISPLAYMODE>(Arg(c, 4)))),
+               5);
+        return;
+    }
+    auto modes = Modes();
+    if (Arg(c, 3) >= modes.size()) {
+        Return(c, uint32_t(D3DERR_INVALIDCALL), 5);
+        return;
+    }
+    D3DDISPLAYMODE m = modes[Arg(c, 3)];
+    m.Format = D3DFORMAT(Arg(c, 2));
+    WriteMode(Arg(c, 4), m);
+    Return(c, D3D_OK, 5);
+}
+M(IDirect3DDevice9, GetDisplayMode) {
+    // (this, iSwapChain, pMode)
+    if (!OverrideModes()) {
+        Return(c, uint32_t(Host<IDirect3DDevice9>(Arg(c, 0))->GetDisplayMode(Arg(c, 1),
+                                                                            Ptr<D3DDISPLAYMODE>(Arg(c, 2)))),
+               3);
+        return;
+    }
+    WriteMode(Arg(c, 2), Modes()[0]);
+    Return(c, D3D_OK, 3);
+}
+
 M(IDirect3D9, CreateDevice) {
     D3DPRESENT_PARAMETERS pp = ToHost(Arg(c, 5));
     IDirect3DDevice9* dev = nullptr;
@@ -521,6 +607,7 @@ M(IDirect3D9, CreateDevice) {
                                                          Arg(c, 4), &pp, &dev);
     Log("CreateDevice %ux%u fmt %u windowed %u -> %08x", pp.BackBufferWidth, pp.BackBufferHeight,
         pp.BackBufferFormat, pp.Windowed, uint32_t(hr));
+    if (SUCCEEDED(hr) && OverrideModes()) SetClientSize(int(pp.BackBufferWidth), int(pp.BackBufferHeight));
     ToGuest(pp, Arg(c, 5));
     W32(Arg(c, 6), SUCCEEDED(hr) ? Wrap(dev) : 0);
     Return(c, uint32_t(hr), 7);
@@ -552,13 +639,15 @@ M(IDirect3DDevice9, Reset) {
     D3DPRESENT_PARAMETERS pp = ToHost(Arg(c, 1));
     HRESULT hr = Host<IDirect3DDevice9>(Arg(c, 0))->Reset(&pp);
     Log("Reset %ux%u -> %08x", pp.BackBufferWidth, pp.BackBufferHeight, uint32_t(hr));
+    if (SUCCEEDED(hr) && OverrideModes()) SetClientSize(int(pp.BackBufferWidth), int(pp.BackBufferHeight));
     ToGuest(pp, Arg(c, 1));
     Return(c, uint32_t(hr), 2);
 }
-// PROTORE_SHOT=<frame>[,<frame>...]: the back buffer of those presents is saved as shot_<frame>.ppm in the working
-// directory (debugging without a desktop screenshot tool, and later on Android).
+// Setting shot=<frame>[,<frame>...] (PROTORE_SHOT): the back buffer of those presents is saved as shot_<frame>.ppm in
+// the working directory (debugging without a desktop screenshot tool; on Android only the game's own frame).
 void MaybeScreenshot(IDirect3DDevice9* dev) {
-    static const char* spec = getenv("PROTORE_SHOT");
+    static const std::string spec_setting = Setting("shot", "");  // protore.ini `shot = ...` works on Android
+    static const char* spec = spec_setting.empty() ? nullptr : spec_setting.c_str();
     static uint32_t frame = 0;
     ++frame;
     if (!spec) return;

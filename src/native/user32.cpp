@@ -151,6 +151,11 @@ void InitClientSize(int window_w, int window_h) {
     Log("render size %dx%d (window %dx%d)", g_width, g_height, window_w, window_h);
 }
 
+void SetClientSize(int w, int h) {
+    g_width = w;
+    g_height = h;
+}
+
 void ClientSize(int* w, int* h) {
     *w = g_width;
     *h = g_height;

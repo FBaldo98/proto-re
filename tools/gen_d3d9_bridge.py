@@ -36,6 +36,9 @@ MANUAL = {
     "IDirect3DTexture9::GetLevelDesc", "IDirect3DTexture9::GetLevelCount", "IDirect3DTexture9::GetSurfaceLevel",
     "IDirect3DCubeTexture9::GetLevelDesc", "IDirect3DCubeTexture9::GetLevelCount",
     "IDirect3DCubeTexture9::GetCubeMapSurface",
+    # display modes follow the render resolution (render_height)
+    "IDirect3D9::GetAdapterDisplayMode", "IDirect3D9::GetAdapterModeCount", "IDirect3D9::EnumAdapterModes",
+    "IDirect3DDevice9::GetDisplayMode",
 }
 
 FLOAT_TYPES = {"float", "FLOAT"}

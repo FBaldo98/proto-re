@@ -12,11 +12,13 @@
 #include <android/log.h>
 #endif
 
+#include <cerrno>
 #include <cstdarg>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "guest.h"
@@ -73,7 +75,35 @@ extern SDL_Window* g_sdl_window;
 
 using namespace native;
 
+#ifdef __ANDROID__
+// DXVK and FAudio report errors on stderr, which goes nowhere in an app: forward it to logcat (tag protore-err).
+static void RedirectStderrToLogcat() {
+    static int fds[2];
+    if (pipe(fds) != 0) return;
+    dup2(fds[1], 2);
+    setvbuf(stderr, nullptr, _IOLBF, 0);
+    std::thread([] {
+        char buf[1024];
+        std::string line;
+        for (ssize_t n; (n = read(fds[0], buf, sizeof(buf))) > 0;) {
+            for (ssize_t i = 0; i < n; ++i) {
+                if (buf[i] == '\n') {
+                    __android_log_write(ANDROID_LOG_WARN, "protore-err", line.c_str());
+                    line.clear();
+                } else {
+                    line += buf[i];
+                }
+            }
+        }
+    }).detach();
+}
+#endif
+
 int main(int argc, char** argv) {
+#ifdef __ANDROID__
+    RedirectStderrToLogcat();
+    setenv("DXVK_LOG_LEVEL", "info", 0);
+#endif
     g_game_dir = argc > 1 ? argv[1] : getenv("PROTORE_GAME");
 #ifdef __ANDROID__
     // The user copies the game into <app external files>/game (/sdcard/Android/data/<package>/files/game); logs,
@@ -81,6 +111,7 @@ int main(int argc, char** argv) {
     static std::string android_game;
     if (!g_game_dir) {
         const char* base = SDL_AndroidGetExternalStoragePath();
+        Log("external storage: %s", base ? base : SDL_GetError());
         if (!base) {
             SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Prototype", SDL_GetError(), nullptr);
             return 1;
@@ -92,7 +123,9 @@ int main(int argc, char** argv) {
         setenv("DXVK_LOG_PATH", base, 0);
         std::string dll = android_game + "/prototypeenginef.dll";
         if (access(dll.c_str(), R_OK) != 0) {
-            std::string msg = "Copy the game files (prototypeenginef.dll, *.rcf, ...) to\n" + android_game;
+            Log("cannot read %s: %s", dll.c_str(), strerror(errno));
+            std::string msg = "Copy the game files (prototypeenginef.dll, *.rcf, ...) to\n" + android_game + "\n(" +
+                              strerror(errno) + ")";
             SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Prototype", msg.c_str(), nullptr);
             return 1;
         }
@@ -129,7 +162,7 @@ int main(int argc, char** argv) {
     InitClientSize(window_w, window_h);
 
     std::string dll = std::string(g_game_dir) + "/prototypeenginef.dll";
-    if (!LoadImage(dll.c_str(), &g_engine)) return 1;
+    if (!LoadImage(dll.c_str(), &g_engine, kEngineBase)) return 1;
     g_engine_lo = g_engine.base;
     g_engine_hi = g_engine.base + g_engine.size;
 

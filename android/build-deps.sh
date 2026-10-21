@@ -31,6 +31,11 @@ fetch SDL2 https://github.com/libsdl-org/SDL.git $SDL2_TAG
 fetch FAudio https://github.com/FNA-XNA/FAudio.git $FAUDIO_TAG
 fetch dxvk https://github.com/doitsujin/dxvk.git $DXVK_TAG
 
+# Android patches (android/patches/<project>-*.patch), applied once.
+for p in "$(dirname "$0")"/patches/dxvk-*.patch; do
+    git -C "$SRC/dxvk" apply --check "$p" 2>/dev/null && git -C "$SRC/dxvk" apply "$p" && echo "applied $(basename "$p")"
+done
+
 CMAKE_ANDROID=(-G Ninja -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" -DANDROID_ABI="$ABI"
                -DANDROID_PLATFORM=android-$API -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PREFIX"
                -DCMAKE_PREFIX_PATH="$PREFIX" -DCMAKE_FIND_ROOT_PATH="$PREFIX")

@@ -61,7 +61,7 @@ std::string Lower(const char* s) {
 
 }  // namespace
 
-bool LoadImage(const char* path, LoadedImage* out) {
+bool LoadImage(const char* path, LoadedImage* out, uint32_t load_base) {
     FILE* f = fopen(path, "rb");
     if (!f) {
         Log("loader: cannot open %s", path);
@@ -84,7 +84,7 @@ bool LoadImage(const char* path, LoadedImage* out) {
         Log("loader: %s is not a PE32 image", path);
         return false;
     }
-    const uint32_t base = opt->image_base;
+    const uint32_t base = load_base ? load_base : opt->image_base;
     const uint32_t size = (opt->image_size + 0xfff) & ~0xfffu;
     void* p = mmap(Ptr<void>(base), size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE,
                    -1, 0);
@@ -99,6 +99,35 @@ bool LoadImage(const char* path, LoadedImage* out) {
         if (n && s.raw_ptr) {
             memcpy(Ptr<void>(base + s.va), file.data() + s.raw_ptr, n);
         }
+    }
+    // Base relocations when the image does not sit at its preferred base: IMAGE_REL_BASED_HIGHLOW entries get the
+    // delta (the recompiler applied the same ones to the code it generated, tools/recomp/recomp.py --base).
+    if (base != opt->image_base) {
+        const DataDir& rd = opt->dir[5];
+        if (!rd.rva) {
+            Log("loader: %s has no relocations, cannot load it at %08x", path, base);
+            return false;
+        }
+        const uint32_t delta = base - opt->image_base;
+        int fixups = 0;
+        for (uint32_t blk = base + rd.rva; blk < base + rd.rva + rd.size;) {
+            uint32_t page = R32(blk), block_size = R32(blk + 4);
+            if (block_size < 8) break;
+            for (uint32_t e = blk + 8; e < blk + block_size; e += 2) {
+                uint16_t v = R16(e);
+                if ((v >> 12) == 3) {  // HIGHLOW
+                    uint32_t at = base + page + (v & 0xfff);
+                    W32(at, R32(at) + delta);
+                    ++fixups;
+                } else if ((v >> 12) != 0) {  // ABSOLUTE (padding) is the only other type in a PE32 DLL
+                    Log("loader: unsupported relocation type %u", v >> 12);
+                    return false;
+                }
+            }
+            blk += block_size;
+        }
+        Ptr<OptHeader32>(base + dos->lfanew + 4 + sizeof(FileHeader))->image_base = base;
+        Log("loader: rebased to %08x (%d fixups)", base, fixups);
     }
     // Imports: every IAT slot gets the thunk of its dll!name (data imports are handled by ImportThunk too).
     const DataDir& id = opt->dir[1];

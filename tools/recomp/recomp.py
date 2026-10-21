@@ -22,7 +22,8 @@ import pefile
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 DLL = os.environ.get("PROTORE_ENGINE",
                      os.path.expanduser("~/Downloads/Prototype (2009)/Prototype/prototypeenginef.dll"))
-BASE = 0x10000000
+BASE = 0x10000000  # the DLL's preferred base; --base rebases everything (rebase())
+ORIG_BASE = 0x10000000
 
 REG32 = {"eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi"}
 REG16 = {"ax": "eax", "cx": "ecx", "dx": "edx", "bx": "ebx", "sp": "esp", "bp": "ebp", "si": "esi", "di": "edi"}
@@ -107,11 +108,29 @@ EXTRA_ENTRIES = set()  # filled by load_functions
 THUNKS = set()  # thunk entries (functions.csv), filled by load_functions
 
 
+def rebase(new_base):
+    """Generates code for the engine loaded at `new_base` instead of its preferred base (the native host on Android,
+    where ART owns 0x10000000): every address taken from the analysis moves by the same delta, and the image bytes
+    get the DLL's base relocations applied (relocate_pe), exactly as the loader does at run time."""
+    global BASE, SETJMP_TARGETS, SETJMP_IAT, LONGJMP_IAT
+    delta = new_base - ORIG_BASE
+    BASE = new_base
+    SETJMP_TARGETS = {a + delta for a in SETJMP_TARGETS}
+    SETJMP_IAT = {a + delta for a in SETJMP_IAT}
+    LONGJMP_IAT = {a + delta for a in LONGJMP_IAT}
+
+
+def relocate_pe(pe):
+    if BASE != ORIG_BASE:
+        pe.parse_data_directories(directories=[pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_BASERELOC"]])
+        pe.relocate_image(BASE)
+
+
 def load_all_starts():
     """Every entry in functions.csv, thunks included."""
     with open(os.path.join(ROOT, "re", "functions.csv")) as f:
         next(f)
-        return [int(row.split(",", 1)[0], 16) for row in f]
+        return [int(row.split(",", 1)[0], 16) - ORIG_BASE + BASE for row in f]
 
 
 class Unsupported(Exception):
@@ -128,7 +147,7 @@ def load_functions():
         next(f)
         for row in f:
             p = row.split(",")
-            va = int(p[0], 16)
+            va = int(p[0], 16) - ORIG_BASE + BASE
             starts.append(va)
             sizes[va] = int(p[1])
             if p[2] != "false":
@@ -144,7 +163,7 @@ def load_functions():
             for line in f:
                 line = line.strip()
                 if line and not line.startswith("#"):
-                    va = int(line, 16)
+                    va = int(line, 16) - ORIG_BASE + BASE
                     if va not in known:
                         starts.append(va)
                         sizes[va] = 1
@@ -1168,14 +1187,18 @@ def main():
     ap.add_argument("--functions", required=True)
     ap.add_argument("--out", required=True, help="output .c file, or a directory with --split")
     ap.add_argument("--split", type=int, default=0, help="functions per file (writes part_NNNN.c + table.c)")
+    ap.add_argument("--base", type=lambda v: int(v, 0), default=ORIG_BASE,
+                    help="engine load address (native host: 0x58000000)")
     args = ap.parse_args()
+    rebase(args.base)
     sizes = load_functions()
     if args.functions == "all":
         vas = sorted(sizes)
     else:
-        vas = sorted(int(l.strip(), 16) + (BASE if int(l.strip(), 16) < BASE else 0)
-                     for l in open(args.functions) if l.strip())
+        vas = sorted((int(l.strip(), 16) if int(l.strip(), 16) >= ORIG_BASE else int(l.strip(), 16) + ORIG_BASE)
+                     - ORIG_BASE + BASE for l in open(args.functions) if l.strip())
     pe = pefile.PE(DLL, fast_load=True)
+    relocate_pe(pe)
     md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_32)
     md.detail = True
     unsupported = collections.Counter()

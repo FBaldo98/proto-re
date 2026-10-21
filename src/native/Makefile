@@ -4,7 +4,8 @@
 #                                libmain.so for the APK (android/build-apk.sh), against the libraries from
 #                                android/build-deps.sh
 PLATFORM ?= linux
-RECOMP_DIR ?= ../../build/recomp/all
+# Generated for the rebased engine: recomp.py --base 0x58000000 --out build/recomp/native (see guest.h)
+RECOMP_DIR ?= ../../build/recomp/native
 DXVK ?= $(HOME)/proto-re-data/deps/dxvk
 COMMON_FLAGS := -DRECOMP_FLAT_MEMORY -fsigned-char -I../recomp
 # Generated code: flat memory turns G() into plain pointers. -O1 on the desktop keeps rebuilds quick; Android gets
