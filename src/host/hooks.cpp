@@ -24,11 +24,13 @@ HMODULE Engine() {
 
 void Log(const char* fmt, ...) {
     if (!g_log) {
-        g_log = fopen("proto-re.log", "w");
+        // Append, and tag every line with the process id: the game may run more than one process.
+        g_log = fopen("proto-re.log", "a");
         if (!g_log) {
             return;
         }
     }
+    fprintf(g_log, "[%lu] ", GetCurrentProcessId());
     va_list args;
     va_start(args, fmt);
     vfprintf(g_log, fmt, args);
@@ -43,10 +45,13 @@ void* EngineAddress(uint32_t rva) {
 }
 
 int InstallHooks(Hook* hooks, size_t count) {
+    // PROTORE_ONLY=<name> installs just that hook, for bisecting behaviour changes to one function.
+    char only[128] = "";
+    GetEnvironmentVariableA("PROTORE_ONLY", only, sizeof(only));
     int installed = 0;
     for (size_t i = 0; i < count; ++i) {
         Hook& h = hooks[i];
-        if (!h.enabled) {
+        if (!h.enabled || (only[0] && strcmp(only, h.name) != 0)) {
             continue;
         }
         auto* target = static_cast<uint8_t*>(EngineAddress(h.rva));
@@ -63,10 +68,18 @@ int InstallHooks(Hook* hooks, size_t count) {
             Log("hook %s: VirtualProtect failed (%lu)", h.name, GetLastError());
             continue;
         }
-        int32_t rel = static_cast<int32_t>(reinterpret_cast<uintptr_t>(h.replacement) -
-                                           (reinterpret_cast<uintptr_t>(target) + 5));
-        target[0] = 0xE9;
-        memcpy(target + 1, &rel, sizeof(rel));
+        // PROTORE_NULLPATCH=1 performs the same protect/write/restore sequence but writes back the original
+        // bytes, to separate effects of touching the code page from effects of the redirected function.
+        if (GetEnvironmentVariableA("PROTORE_NULLPATCH", nullptr, 0) != 0) {
+            uint8_t same[5];
+            memcpy(same, target, sizeof(same));
+            memcpy(target, same, sizeof(same));
+        } else {
+            int32_t rel = static_cast<int32_t>(reinterpret_cast<uintptr_t>(h.replacement) -
+                                               (reinterpret_cast<uintptr_t>(target) + 5));
+            target[0] = 0xE9;
+            memcpy(target + 1, &rel, sizeof(rel));
+        }
         VirtualProtect(target, 5, old_protect, &old_protect);
         FlushInstructionCache(GetCurrentProcess(), target, 5);
         Log("hook %s: installed at rva 0x%08x", h.name, h.rva);

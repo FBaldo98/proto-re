@@ -31,7 +31,10 @@ bool EngineBuildMatches() {
 BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
         protore::Log("proto-re host attached");
-        if (EngineBuildMatches()) {
+        // PROTORE_NOHOOKS=1 runs the original engine through the same proxy, for A/B comparisons.
+        if (GetEnvironmentVariableA("PROTORE_NOHOOKS", nullptr, 0) != 0) {
+            protore::Log("PROTORE_NOHOOKS set, hooks disabled");
+        } else if (EngineBuildMatches()) {
             size_t count = 0;
             protore::Hook* hooks = protore::Registry(&count);
             int installed = protore::InstallHooks(hooks, count);
