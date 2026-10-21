@@ -9,6 +9,7 @@ const protore::DiffTest g_tests[] = {
     {"math::TraceVector", &TestTraceVector},
     {"core::HashString/HashFileName", &TestNameHash},
     {"core::CementLibrary lookup", &TestCementLookup},
+    {"core::CementFileRangeInit", &TestCementFileRange},
 };
 
 }  // namespace

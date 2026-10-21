@@ -3,8 +3,11 @@
 // comparing two captures compares the reports two implementations would have made.
 #pragma once
 
+#include <memory>
 #include <string>
 #include <vector>
+
+#include "../host/hooks.h"
 
 namespace tests {
 
@@ -27,6 +30,9 @@ public:
 
     bool active() const;
     std::vector<ReportCall> Take();
+
+private:
+    std::unique_ptr<protore::TestDetour> detour_;
 };
 
 }  // namespace tests

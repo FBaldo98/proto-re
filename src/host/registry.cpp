@@ -1,5 +1,6 @@
 #include "registry.h"
 
+#include "../core/cement_file_range.h"
 #include "../core/cement_library.h"
 #include "../core/name_hash.h"
 #include "../core/report.h"
@@ -33,6 +34,9 @@ Hook g_hooks[] = {
     // mov eax,[esp+4]; cmp byte ptr [eax],5Ch
     {"core::CementLibraryOpenByName", 0x00650cf0, reinterpret_cast<void*>(&core::CementLibraryOpenByName),
      {0x8b, 0x44, 0x24, 0x04, 0x80, 0x38, 0x5c, 0x56}, 8, 7, true, {}},
+    // push ebx; mov ebx,[esp+8]
+    {"core::CementFileRangeInit", 0x00651130, reinterpret_cast<void*>(&core::CementFileRangeInit),
+     {0x53, 0x8b, 0x5c, 0x24, 0x08, 0x8b, 0x03}, 7, 5, true, {}},
 };
 
 }  // namespace

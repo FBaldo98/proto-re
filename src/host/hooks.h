@@ -39,7 +39,9 @@ struct Hook {
     Detour detour;           // filled by InstallHooks
 };
 
-// Returns pointer to a location in the loaded engine.
+// Returns pointer to a location in the loaded engine. For a function this is its live entry point: calls through
+// it reach whatever is installed there (original, reconstruction hook, or a test detour), so reconstructions call
+// other engine functions this way while the engine is hybrid.
 void* EngineAddress(uint32_t rva);
 
 // Callable original for `rva`: the trampoline if that function is hooked, else the engine address.
@@ -47,6 +49,21 @@ void* OriginalFunction(uint32_t rva);
 
 // Patches every enabled hook; returns number installed, logs each failure.
 int InstallHooks(Hook* hooks, size_t count);
+
+// Test-only detour: for its lifetime the function at `rva` is replaced by `replacement`, even if a reconstruction
+// hook is installed there (the hook is suspended and restored afterwards).
+class TestDetour {
+public:
+    TestDetour(uint32_t rva, size_t stolen_len, const uint8_t* expected, size_t expected_len, void* replacement);
+    ~TestDetour();
+    TestDetour(const TestDetour&) = delete;
+    TestDetour& operator=(const TestDetour&) = delete;
+    bool ok() const { return detour_.target != nullptr; }
+
+private:
+    Hook* suspended_ = nullptr;
+    Detour detour_;
+};
 
 void Log(const char* fmt, ...);
 

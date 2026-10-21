@@ -140,6 +140,30 @@ void DetourDetach(Detour* d) {
     }
 }
 
+TestDetour::TestDetour(uint32_t rva, size_t stolen_len, const uint8_t* expected, size_t expected_len,
+                       void* replacement) {
+    for (size_t i = 0; i < g_hook_count; ++i) {
+        if (g_hooks[i].rva == rva && g_hooks[i].detour.target) {
+            suspended_ = &g_hooks[i];
+            DetourDetach(&suspended_->detour);
+            break;
+        }
+    }
+    if (!DetourAttach(&detour_, rva, stolen_len, expected, expected_len, replacement)) {
+        Log("TestDetour: could not detour rva 0x%08x", rva);
+    }
+}
+
+TestDetour::~TestDetour() {
+    DetourDetach(&detour_);
+    if (suspended_) {
+        Hook& h = *suspended_;
+        if (!DetourAttach(&h.detour, h.rva, h.stolen_len, h.expected, h.expected_len, h.replacement)) {
+            Log("TestDetour: could not restore hook %s", h.name);
+        }
+    }
+}
+
 int InstallHooks(Hook* hooks, size_t count) {
     g_hooks = hooks;
     g_hook_count = count;

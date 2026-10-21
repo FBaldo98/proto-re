@@ -82,13 +82,12 @@ void __thiscall RecordOpenRange(void* request, uint32_t a1, uint32_t a2, uint32_
 
 class OpenRangeCapture {
 public:
-    OpenRangeCapture() {
+    OpenRangeCapture()
+        : detour_(kOpenRangeRva, sizeof(kOpenRangeBytes), kOpenRangeBytes, sizeof(kOpenRangeBytes),
+                  reinterpret_cast<void*>(&RecordOpenRange)) {
         g_open_range_calls.clear();
-        ok_ = protore::DetourAttach(&detour_, kOpenRangeRva, sizeof(kOpenRangeBytes), kOpenRangeBytes,
-                                    sizeof(kOpenRangeBytes), reinterpret_cast<void*>(&RecordOpenRange));
     }
-    ~OpenRangeCapture() { protore::DetourDetach(&detour_); }
-    bool ok() const { return ok_; }
+    bool ok() const { return detour_.ok(); }
     std::vector<OpenRangeCall> Take() {
         std::vector<OpenRangeCall> out;
         out.swap(g_open_range_calls);
@@ -96,8 +95,7 @@ public:
     }
 
 private:
-    protore::Detour detour_;
-    bool ok_ = false;
+    protore::TestDetour detour_;
 };
 
 // Minimal stand-in for the engine object: only the fields the lookup reads are meaningful.

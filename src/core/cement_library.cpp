@@ -30,7 +30,8 @@ T Field(const void* base, uint32_t offset) {
     return *reinterpret_cast<const T*>(static_cast<const uint8_t*>(base) + offset);
 }
 
-// FUN_10651130: thiscall on the request, 8 stack arguments (ret 20h). Not reconstructed yet.
+// FUN_10651130 (core::CementFileRangeInit): thiscall, 8 stack arguments (ret 20h). Called through its live engine
+// entry point so a test detour or the reconstruction hook installed there is what runs.
 using OpenRangeFn = void(__thiscall*)(CementOpenRequest* request, void* drive, uint32_t offset, uint32_t size,
                                       uint32_t entry_size, uint32_t extra, uint32_t owner_word_a,
                                       uint32_t owner_word_b, uint32_t tag);
@@ -88,7 +89,7 @@ bool __thiscall CementLibraryFindAndOpen(CementLibrary* self, uint32_t key, Ceme
     const uint32_t word_a = Field<uint32_t>(owner_sub, kOwnerWordAOffset);
     const uint32_t word_b = Field<uint32_t>(owner_sub, kOwnerWordBOffset);
 
-    auto open_range = reinterpret_cast<OpenRangeFn>(protore::OriginalFunction(kOpenRangeRva));
+    auto open_range = reinterpret_cast<OpenRangeFn>(protore::EngineAddress(kOpenRangeRva));
     open_range(request, Field<void*>(self, kDriveOffset), entry->offset, size_arg, entry->size, extra, word_a, word_b,
                Field<uint32_t>(self, kRequestTagOffset));
     return true;

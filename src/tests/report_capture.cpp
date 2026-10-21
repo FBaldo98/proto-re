@@ -14,7 +14,6 @@ constexpr uint32_t kVReportRva = 0x0063c340;
 // mov ecx,[esp+14h]; mov eax,[esp+18h]
 constexpr uint8_t kVReportBytes[] = {0x8b, 0x4c, 0x24, 0x14, 0x8b, 0x44, 0x24, 0x18};
 
-protore::Detour g_detour;
 std::vector<ReportCall> g_calls;
 int g_scripted_result = 0;
 
@@ -42,18 +41,14 @@ bool operator==(const ReportCall& a, const ReportCall& b) {
 ReportCapture::ReportCapture(int scripted_result) {
     g_calls.clear();
     g_scripted_result = scripted_result;
-    if (!protore::DetourAttach(&g_detour, kVReportRva, sizeof(kVReportBytes), kVReportBytes,
-                               sizeof(kVReportBytes), reinterpret_cast<void*>(&RecordVReport))) {
-        protore::Log("ReportCapture: could not detour VReport");
-    }
+    detour_ = std::make_unique<protore::TestDetour>(kVReportRva, sizeof(kVReportBytes), kVReportBytes,
+                                                    sizeof(kVReportBytes), reinterpret_cast<void*>(&RecordVReport));
 }
 
-ReportCapture::~ReportCapture() {
-    protore::DetourDetach(&g_detour);
-}
+ReportCapture::~ReportCapture() = default;
 
 bool ReportCapture::active() const {
-    return g_detour.target != nullptr;
+    return detour_ && detour_->ok();
 }
 
 std::vector<ReportCall> ReportCapture::Take() {
