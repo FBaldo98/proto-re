@@ -27,6 +27,22 @@ struct CementEntryWide {
 };
 static_assert(sizeof(CementEntryWide) == 20, "wide entry is 20 bytes");
 
+// Load states stored at +0x24 (observed: FindAndOpen requires 1; the loader writes 1 and 2).
+enum CementLibraryState : int32_t {
+    kCementStateLoaded = 1,
+    kCementStateFailed = 2,
+};
+
+// Original: FUN_106503c0 (rva 0x006503c0), thiscall, no stack arguments. Validates the 0x3c-byte .rcf header that
+// the loader reads to +0x28: the 24-byte magic "ATG CORE CEMENT LIBRARY\0", version bytes at +0x48..+0x4b
+// (major must be 2, +0x4b nonzero, minor at +0x49 below 2, +0x4a zero) and, for minor 0 (wide entries), that the
+// words at +0x18 and +0x1c are equal. Every check is evaluated; the result is their conjunction (in al).
+bool __thiscall CementLibraryValidateHeader(CementLibrary* self);
+
+// Original: FUN_10650410 (rva 0x00650410), thiscall, ret 4. Stores the state; if a completion object is pending at
+// +0x70, calls its slot 3 with the word at +0x74, then its slot 1, and clears both fields.
+void __thiscall CementLibrarySetState(CementLibrary* self, int32_t state);
+
 // Original: FUN_106502c0 (rva 0x006502c0), cdecl. Binary search over `count` records of `stride` bytes whose
 // first word is an unsigned key; returns the matching record or null. The midpoint is computed as
 // (hi >> 1) + (lo >> 1) + (lo & hi & 1) and the probe order must be kept: with duplicate keys it decides which

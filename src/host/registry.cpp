@@ -37,6 +37,12 @@ Hook g_hooks[] = {
     // push ebx; mov ebx,[esp+8]
     {"core::CementFileRangeInit", 0x00651130, reinterpret_cast<void*>(&core::CementFileRangeInit),
      {0x53, 0x8b, 0x5c, 0x24, 0x08, 0x8b, 0x03}, 7, 5, true, {}},
+    // push ebx; push esi; push edi; mov edx,ecx
+    {"core::CementLibraryValidateHeader", 0x006503c0, reinterpret_cast<void*>(&core::CementLibraryValidateHeader),
+     {0x53, 0x56, 0x57, 0x8b, 0xd1, 0x33, 0xdb}, 7, 5, true, {}},
+    // mov eax,[esp+4]; push esi
+    {"core::CementLibrarySetState", 0x00650410, reinterpret_cast<void*>(&core::CementLibrarySetState),
+     {0x8b, 0x44, 0x24, 0x04, 0x56, 0x8b, 0xf1}, 7, 5, true, {}},
 };
 
 }  // namespace

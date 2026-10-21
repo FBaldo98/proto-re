@@ -1,5 +1,7 @@
 #include "cement_library.h"
 
+#include <cstring>
+
 #include "../host/hooks.h"
 #include "name_hash.h"
 
@@ -16,7 +18,38 @@ constexpr uint32_t kRequestTagOffset = 0x5c;    // word passed through to the re
 constexpr uint32_t kEntryCountOffset = 0x60;
 constexpr uint32_t kEntriesOffset = 0x64;
 
-constexpr int32_t kStateLoaded = 1;
+constexpr int32_t kStateLoaded = kCementStateLoaded;
+
+// Header copy read by the loader (0x3c bytes at +0x28), and the fields ValidateHeader checks.
+constexpr uint32_t kHeaderOffset = 0x28;
+constexpr char kMagic[] = "ATG CORE CEMENT LIBRARY";  // compared including its terminating NUL (24 bytes)
+static_assert(sizeof(kMagic) == 24, "magic is 24 bytes with NUL");
+constexpr uint32_t kVersionMajorOffset = 0x48;
+constexpr uint32_t kVersionMinorOffset = kCompactOffset;  // 0x49: 1 = compact entries, 0 = wide
+constexpr uint32_t kVersionReservedOffset = 0x4a;
+constexpr uint32_t kVersionFlagOffset = 0x4b;
+constexpr uint32_t kWideCheckAOffset = 0x18;  // must equal +0x1c for wide-entry archives
+constexpr uint32_t kWideCheckBOffset = 0x1c;
+
+// Pending completion object notified by SetState.
+constexpr uint32_t kCompletionOffset = 0x70;
+constexpr uint32_t kCompletionArgOffset = 0x74;
+constexpr int kCompletionSlotNotify = 3;   // vtable +0x0c, takes the stored argument
+constexpr int kCompletionSlotRelease = 1;  // vtable +0x04
+
+template <typename T>
+void SetField(void* base, uint32_t offset, T value) {
+    *reinterpret_cast<T*>(static_cast<uint8_t*>(base) + offset) = value;
+}
+
+using NotifyFn = void(__thiscall*)(void* completion, uint32_t arg);
+using ReleaseFn = void(__thiscall*)(void* completion);
+
+template <typename Fn>
+Fn Slot(void* object, int index) {
+    void** vtable = *static_cast<void***>(object);
+    return reinterpret_cast<Fn>(vtable[index]);
+}
 
 // Owner sub-object (FUN_1064ff10 returns owner + 0x14) and the two words FUN_10650690 copies out of it.
 constexpr uint32_t kOwnerSubOffset = 0x14;
@@ -37,6 +70,38 @@ using OpenRangeFn = void(__thiscall*)(CementOpenRequest* request, void* drive, u
                                       uint32_t owner_word_b, uint32_t tag);
 
 }  // namespace
+
+bool __thiscall CementLibraryValidateHeader(CementLibrary* self) {
+    const auto* header = reinterpret_cast<const uint8_t*>(self) + kHeaderOffset;
+    bool ok = memcmp(header, kMagic, sizeof(kMagic)) == 0;
+    if (Field<uint8_t>(self, kVersionMajorOffset) != 2 || Field<uint8_t>(self, kVersionFlagOffset) == 0) {
+        ok = false;
+    }
+    const uint8_t minor = Field<uint8_t>(self, kVersionMinorOffset);
+    if (minor >= 2) {
+        ok = false;
+    }
+    if (minor == 0 && Field<uint32_t>(self, kWideCheckBOffset) != Field<uint32_t>(self, kWideCheckAOffset)) {
+        ok = false;
+    }
+    if (Field<uint8_t>(self, kVersionReservedOffset) != 0) {
+        ok = false;
+    }
+    return ok;
+}
+
+void __thiscall CementLibrarySetState(CementLibrary* self, int32_t state) {
+    SetField<int32_t>(self, kStateOffset, state);
+    void* completion = Field<void*>(self, kCompletionOffset);
+    if (!completion) {
+        return;
+    }
+    Slot<NotifyFn>(completion, kCompletionSlotNotify)(completion, Field<uint32_t>(self, kCompletionArgOffset));
+    completion = Field<void*>(self, kCompletionOffset);  // re-read, as the original does after the first call
+    Slot<ReleaseFn>(completion, kCompletionSlotRelease)(completion);
+    SetField<void*>(self, kCompletionOffset, nullptr);
+    SetField<uint32_t>(self, kCompletionArgOffset, 0);
+}
 
 const void* CementFindEntry(const void* entries, uint32_t count, uint32_t key, uint32_t stride) {
     if (count == 0) {

@@ -14,5 +14,6 @@ void TestTraceVector(protore::DiffResult* r);
 void TestNameHash(protore::DiffResult* r);
 void TestCementLookup(protore::DiffResult* r);
 void TestCementFileRange(protore::DiffResult* r);
+void TestCementState(protore::DiffResult* r);
 
 }  // namespace tests

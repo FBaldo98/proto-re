@@ -9,7 +9,7 @@ OUT := ../../build/host
 HOST_SRCS := dllmain.cpp hooks.cpp registry.cpp difftest.cpp probes.cpp memwatch.cpp
 CORE_SRCS := report.cpp name_hash.cpp cement_library.cpp cement_file_range.cpp
 MATH_SRCS := vector_trace.cpp
-TEST_SRCS := tests.cpp report_capture.cpp report_test.cpp vector_trace_test.cpp name_hash_test.cpp cement_library_test.cpp cement_file_range_test.cpp
+TEST_SRCS := tests.cpp report_capture.cpp report_test.cpp vector_trace_test.cpp name_hash_test.cpp cement_library_test.cpp cement_file_range_test.cpp cement_state_test.cpp
 
 OBJS := $(HOST_SRCS:%.cpp=$(OUT)/host/%.o) \
         $(CORE_SRCS:%.cpp=$(OUT)/core/%.o) \

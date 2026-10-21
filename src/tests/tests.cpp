@@ -10,6 +10,7 @@ const protore::DiffTest g_tests[] = {
     {"core::HashString/HashFileName", &TestNameHash},
     {"core::CementLibrary lookup", &TestCementLookup},
     {"core::CementFileRangeInit", &TestCementFileRange},
+    {"core::CementLibrary header/state", &TestCementState},
 };
 
 }  // namespace
