@@ -6,3 +6,4 @@
 *.dds
 extracted/
 __pycache__/
+ghidra/
