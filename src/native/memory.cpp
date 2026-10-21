@@ -6,6 +6,8 @@
 //
 // The arena is mapped read/write with MAP_NORESERVE once; the kernel commits pages on first touch, which matches
 // VirtualAlloc's reserve/commit closely enough for the engine (it never relies on access faults in reserved pages).
+// Only the free parts are taken: on Android, ART keeps its Java heap and boot image below 4 GiB (compressed
+// references), so the arena is the set of gaps between the mappings already there.
 #include <sys/mman.h>
 
 #include <cstring>
@@ -105,12 +107,37 @@ int ClassFor(uint32_t total) {
 }  // namespace
 
 void InitGuestMemory() {
-    void* p = mmap(reinterpret_cast<void*>(uintptr_t(kArenaLo)), kArenaHi - kArenaLo, PROT_READ | PROT_WRITE,
-                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE, -1, 0);
-    if (p != reinterpret_cast<void*>(uintptr_t(kArenaLo))) {
-        Fatal("cannot reserve the guest arena at %08x (%p)", kArenaLo, p);
+    // Mappings overlapping the arena, rounded out to the allocation granularity.
+    std::map<uint64_t, uint64_t> taken;  // start -> end
+    if (FILE* maps = fopen("/proc/self/maps", "r")) {
+        char line[512];
+        while (fgets(line, sizeof(line), maps)) {
+            unsigned long long lo, hi;
+            if (sscanf(line, "%llx-%llx", &lo, &hi) != 2 || lo >= kArenaHi || hi <= kArenaLo) continue;
+            taken[lo & ~uint64_t(kPage - 1)] = (hi + kPage - 1) & ~uint64_t(kPage - 1);
+        }
+        fclose(maps);
     }
-    g_free[kArenaLo] = kArenaHi - kArenaLo;
+    uint64_t cursor = kArenaLo, total = 0;
+    auto reserve = [&](uint64_t lo, uint64_t hi) {
+        if (hi <= lo) return;
+        void* p = mmap(reinterpret_cast<void*>(uintptr_t(lo)), size_t(hi - lo), PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE, -1, 0);
+        if (p != reinterpret_cast<void*>(uintptr_t(lo))) {
+            if (p != MAP_FAILED) munmap(p, size_t(hi - lo));
+            Log("memory: cannot reserve %08llx-%08llx", (unsigned long long)lo, (unsigned long long)hi);
+            return;
+        }
+        g_free[uint32_t(lo)] = uint32_t(hi - lo);
+        total += hi - lo;
+    };
+    for (const auto& t : taken) {
+        if (t.first > cursor) reserve(cursor, t.first);
+        if (t.second > cursor) cursor = t.second;
+    }
+    reserve(cursor, kArenaHi);
+    if (total < (512u << 20)) Fatal("guest arena too small: %llu MiB free below 4 GiB", (unsigned long long)(total >> 20));
+    if (!taken.empty()) Log("memory: arena %llu MiB in %zu ranges", (unsigned long long)(total >> 20), g_free.size());
     InitClasses();
 }
 
