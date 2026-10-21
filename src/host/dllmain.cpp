@@ -4,6 +4,7 @@
 // engine code executes.
 #include <windows.h>
 
+#include "difftest.h"
 #include "hooks.h"
 #include "registry.h"
 
@@ -39,6 +40,9 @@ BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
             protore::Hook* hooks = protore::Registry(&count);
             int installed = protore::InstallHooks(hooks, count);
             protore::Log("%d of %u hooks installed", installed, static_cast<unsigned>(count));
+            if (GetEnvironmentVariableA("PROTORE_DIFFTEST", nullptr, 0) != 0) {
+                protore::InstallDiffTestTrigger();
+            }
         }
     }
     return TRUE;

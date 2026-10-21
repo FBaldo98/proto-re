@@ -1,7 +1,5 @@
 #include "report.h"
 
-#include <windows.h>
-
 #include <cstdio>
 
 #include "../host/hooks.h"
@@ -38,7 +36,6 @@ int VReport(int kind, const char* tag, const char* file, int line, const char* e
 }
 
 int Report(int kind, const char* tag, const char* file, int line, const char* expr, const char* fmt, ...) {
-    protore::Log("report enter kind=%d line=%d thread=%04lx", kind, line, GetCurrentThreadId());
     va_list args;
     va_start(args, fmt);
     Mirror(kind, tag, file, line, expr, fmt, args);

@@ -13,11 +13,55 @@ namespace {
 HMODULE g_engine = nullptr;
 FILE* g_log = nullptr;
 
+Hook* g_hooks = nullptr;
+size_t g_hook_count = 0;
+
 HMODULE Engine() {
     if (!g_engine) {
         g_engine = GetModuleHandleA("prototypeenginef.dll");
     }
     return g_engine;
+}
+
+// Bump allocator for trampolines in one executable page block.
+uint8_t* AllocTrampoline(size_t size) {
+    static uint8_t* pool = nullptr;
+    static size_t used = 0;
+    constexpr size_t kPoolSize = 64 * 1024;
+    if (!pool) {
+        pool = static_cast<uint8_t*>(VirtualAlloc(nullptr, kPoolSize, MEM_COMMIT | MEM_RESERVE,
+                                                  PAGE_EXECUTE_READWRITE));
+        if (!pool) {
+            return nullptr;
+        }
+    }
+    size = (size + 15) & ~size_t(15);
+    if (used + size > kPoolSize) {
+        return nullptr;
+    }
+    uint8_t* p = pool + used;
+    used += size;
+    return p;
+}
+
+// Encodes JMP rel32 into `out`; the displacement is relative to `address`, where the jump will execute
+// (which differs from `out` when the bytes are assembled in a buffer before being copied into place).
+void WriteJump(uint8_t* out, const void* address, const void* to) {
+    int32_t rel =
+        static_cast<int32_t>(reinterpret_cast<uintptr_t>(to) - (reinterpret_cast<uintptr_t>(address) + 5));
+    out[0] = 0xE9;
+    memcpy(out + 1, &rel, sizeof(rel));
+}
+
+bool WriteCode(uint8_t* target, const uint8_t* bytes, size_t len) {
+    DWORD old_protect;
+    if (!VirtualProtect(target, len, PAGE_EXECUTE_READWRITE, &old_protect)) {
+        return false;
+    }
+    memcpy(target, bytes, len);
+    VirtualProtect(target, len, old_protect, &old_protect);
+    FlushInstructionCache(GetCurrentProcess(), target, len);
+    return true;
 }
 
 }  // namespace
@@ -44,7 +88,61 @@ void* EngineAddress(uint32_t rva) {
     return engine ? reinterpret_cast<uint8_t*>(engine) + rva : nullptr;
 }
 
+void* OriginalFunction(uint32_t rva) {
+    for (size_t i = 0; i < g_hook_count; ++i) {
+        if (g_hooks[i].rva == rva && g_hooks[i].detour.trampoline) {
+            return g_hooks[i].detour.trampoline;
+        }
+    }
+    return EngineAddress(rva);
+}
+
+bool DetourAttach(Detour* d, uint32_t rva, size_t stolen_len, const uint8_t* expected, size_t expected_len,
+                  void* replacement) {
+    auto* target = static_cast<uint8_t*>(EngineAddress(rva));
+    if (!target || stolen_len < 5 || stolen_len > sizeof(d->saved) || expected_len < stolen_len) {
+        return false;
+    }
+    if (memcmp(target, expected, expected_len) != 0) {
+        return false;
+    }
+    uint8_t* tramp = AllocTrampoline(stolen_len + 5);
+    if (!tramp) {
+        return false;
+    }
+    memcpy(tramp, target, stolen_len);
+    WriteJump(tramp + stolen_len, tramp + stolen_len, target + stolen_len);
+
+    // PROTORE_NULLPATCH=1 performs the same protect/write/restore sequence but writes back the original
+    // bytes, to separate effects of touching the code page from effects of the redirected function.
+    uint8_t patch[16];
+    memcpy(patch, target, stolen_len);
+    if (GetEnvironmentVariableA("PROTORE_NULLPATCH", nullptr, 0) == 0) {
+        WriteJump(patch, target, replacement);
+        for (size_t i = 5; i < stolen_len; ++i) {
+            patch[i] = 0xCC;  // int3 over the tail of a split instruction: jumping there must fault loudly
+        }
+    }
+    memcpy(d->saved, target, stolen_len);
+    if (!WriteCode(target, patch, stolen_len)) {
+        return false;
+    }
+    d->target = target;
+    d->stolen_len = stolen_len;
+    d->trampoline = tramp;
+    return true;
+}
+
+void DetourDetach(Detour* d) {
+    if (d->target) {
+        WriteCode(d->target, d->saved, d->stolen_len);
+        d->target = nullptr;
+    }
+}
+
 int InstallHooks(Hook* hooks, size_t count) {
+    g_hooks = hooks;
+    g_hook_count = count;
     // PROTORE_ONLY=<name> installs just that hook, for bisecting behaviour changes to one function.
     char only[128] = "";
     GetEnvironmentVariableA("PROTORE_ONLY", only, sizeof(only));
@@ -54,34 +152,10 @@ int InstallHooks(Hook* hooks, size_t count) {
         if (!h.enabled || (only[0] && strcmp(only, h.name) != 0)) {
             continue;
         }
-        auto* target = static_cast<uint8_t*>(EngineAddress(h.rva));
-        if (!target) {
-            Log("hook %s: engine not loaded", h.name);
+        if (!DetourAttach(&h.detour, h.rva, h.stolen_len, h.expected, h.expected_len, h.replacement)) {
+            Log("hook %s: not installed at rva 0x%08x (bytes mismatch or protect failure)", h.name, h.rva);
             continue;
         }
-        if (memcmp(target, h.expected, h.expected_len) != 0) {
-            Log("hook %s: bytes at rva 0x%08x do not match, skipped", h.name, h.rva);
-            continue;
-        }
-        DWORD old_protect;
-        if (!VirtualProtect(target, 5, PAGE_EXECUTE_READWRITE, &old_protect)) {
-            Log("hook %s: VirtualProtect failed (%lu)", h.name, GetLastError());
-            continue;
-        }
-        // PROTORE_NULLPATCH=1 performs the same protect/write/restore sequence but writes back the original
-        // bytes, to separate effects of touching the code page from effects of the redirected function.
-        if (GetEnvironmentVariableA("PROTORE_NULLPATCH", nullptr, 0) != 0) {
-            uint8_t same[5];
-            memcpy(same, target, sizeof(same));
-            memcpy(target, same, sizeof(same));
-        } else {
-            int32_t rel = static_cast<int32_t>(reinterpret_cast<uintptr_t>(h.replacement) -
-                                               (reinterpret_cast<uintptr_t>(target) + 5));
-            target[0] = 0xE9;
-            memcpy(target + 1, &rel, sizeof(rel));
-        }
-        VirtualProtect(target, 5, old_protect, &old_protect);
-        FlushInstructionCache(GetCurrentProcess(), target, 5);
         Log("hook %s: installed at rva 0x%08x", h.name, h.rva);
         ++installed;
     }

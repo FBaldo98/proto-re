@@ -4,24 +4,31 @@ CXXFLAGS := -std=c++17 -O2 -Wall -Wextra -fno-exceptions -fno-rtti
 LDFLAGS := -shared -static -static-libgcc -static-libstdc++ -Wl,--enable-stdcall-fixup
 
 OUT := ../../build/host
-SRCS := dllmain.cpp hooks.cpp registry.cpp
+
+# Each module directory under src/ (relative to this Makefile) and its sources.
+HOST_SRCS := dllmain.cpp hooks.cpp registry.cpp difftest.cpp
 CORE_SRCS := report.cpp
 MATH_SRCS := vector_trace.cpp
-OBJS := $(SRCS:%.cpp=$(OUT)/%.o) $(CORE_SRCS:%.cpp=$(OUT)/core/%.o) $(MATH_SRCS:%.cpp=$(OUT)/math/%.o)
+TEST_SRCS := tests.cpp report_capture.cpp report_test.cpp vector_trace_test.cpp
+
+OBJS := $(HOST_SRCS:%.cpp=$(OUT)/host/%.o) \
+        $(CORE_SRCS:%.cpp=$(OUT)/core/%.o) \
+        $(MATH_SRCS:%.cpp=$(OUT)/math/%.o) \
+        $(TEST_SRCS:%.cpp=$(OUT)/tests/%.o)
+
+HEADERS := $(wildcard *.h ../core/*.h ../math/*.h ../tests/*.h)
 
 $(OUT)/binkw32.dll: $(OBJS) binkw32.def
 	$(CXX) $(LDFLAGS) -o $@ $(OBJS) binkw32.def
 
-$(OUT)/%.o: %.cpp hooks.h registry.h | $(OUT)
+$(OUT)/host/%.o: %.cpp $(HEADERS) | $(OUT)/host
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
-$(OUT)/core/%.o: ../core/%.cpp ../core/%.h hooks.h | $(OUT)/core
+$(OUT)/%.o: ../%.cpp $(HEADERS)
+	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
-$(OUT)/math/%.o: ../math/%.cpp ../math/%.h hooks.h | $(OUT)/math
-	$(CXX) $(CXXFLAGS) -c -o $@ $<
-
-$(OUT) $(OUT)/core $(OUT)/math:
+$(OUT)/host:
 	mkdir -p $@
 
 clean:
