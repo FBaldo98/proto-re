@@ -103,6 +103,9 @@ def flag_sets(ins):
     return defs, uses
 
 
+EXTRA_ENTRIES = set()  # filled by load_functions
+
+
 class Unsupported(Exception):
     pass
 
@@ -121,12 +124,28 @@ def load_functions():
             starts.append(va)
             if p[2] == "false":
                 sizes[va] = int(p[1])
+    # Entries Ghidra missed (tools/recomp/data_entries.py): decoded up to the next entry like the others.
+    extra_path = os.path.join(ROOT, "re", "extra_functions.txt")
+    if os.path.exists(extra_path):
+        known = set(starts)
+        with open(extra_path) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    va = int(line, 16)
+                    if va not in known:
+                        starts.append(va)
+                        sizes[va] = 1
+                        EXTRA_ENTRIES.add(va)
     starts.sort()
     import bisect
+    # Missed entries never shorten a Ghidra function: a false positive in its tail would cut its decoding.
+    ghidra_starts = [va for va in starts if va not in EXTRA_ENTRIES]
     extents = {}
     for va, size in sizes.items():
-        i = bisect.bisect_right(starts, va)
-        nxt = starts[i] if i < len(starts) else va + size
+        bound = starts if va in EXTRA_ENTRIES else ghidra_starts
+        i = bisect.bisect_right(bound, va)
+        nxt = bound[i] if i < len(bound) else va + size
         extents[va] = max(size, nxt - va)
     return extents
 
@@ -1118,7 +1137,8 @@ def main():
         fc = FunctionCompiler(md, pe, va, sizes[va], compiled)
         funcs.append((va, fc.compile()))
         unsupported.update(fc.unsupported)
-        patch = entry_patch(fc)
+        # Missed entries are only reachable through computed calls; the in-process bridge leaves them native.
+        patch = entry_patch(fc) if va not in EXTRA_ENTRIES else None
         if patch:
             patches.append((va, patch))
     if args.split:

@@ -1,0 +1,105 @@
+// Native host entry point: replaces prototypef.exe. Loads prototypeenginef.dll into guest memory, runs its CRT
+// startup (DllMain) and drives the six Engine* exports the way prototypef.exe does:
+//   EngineInitialize(&{command line, hwnd, hwnd}) -> bool
+//   loop: EngineKeyboardService(msg, wParam, lParam, caps, num) / EngineMouseService(msg, wParam, lParam) per
+//         window message, then EngineService(quit_requested, inactive) -> bool (false: leave the loop),
+//         EngineWindowFocus(focused)
+//   EngineTerminate()
+#include <unistd.h>
+
+#include <cstdarg>
+#include <cstdlib>
+#include <cstring>
+#include <mutex>
+#include <string>
+
+#include "guest.h"
+#include "win.h"
+
+namespace native {
+
+const char* g_game_dir = nullptr;
+
+namespace {
+std::mutex g_log_mutex;
+FILE* g_log = nullptr;
+}  // namespace
+
+void Log(const char* fmt, ...) {
+    std::lock_guard<std::mutex> lock(g_log_mutex);
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+    fputc('\n', stderr);
+    if (g_log) {
+        va_start(ap, fmt);
+        vfprintf(g_log, fmt, ap);
+        va_end(ap);
+        fputc('\n', g_log);
+        fflush(g_log);
+    }
+}
+
+void Fatal(const char* fmt, ...) {
+    char buf[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    Log("FATAL: %s", buf);
+    _exit(70);
+}
+
+uint32_t HostWindow();  // user32.cpp
+
+}  // namespace native
+
+using namespace native;
+
+int main(int argc, char** argv) {
+    g_game_dir = argc > 1 ? argv[1] : getenv("PROTORE_GAME");
+    if (!g_game_dir) {
+        fprintf(stderr, "usage: %s <game directory>\n", argv[0]);
+        return 2;
+    }
+    g_log = fopen("proto-native.log", "w");
+    InitGuestMemory();
+    AttachThread(8u << 20);
+
+    std::string dll = std::string(g_game_dir) + "/prototypeenginef.dll";
+    if (!LoadImage(dll.c_str(), &g_engine)) return 1;
+    g_engine_lo = g_engine.base;
+    g_engine_hi = g_engine.base + g_engine.size;
+
+    uint32_t init = FindExport(g_engine, "EngineInitialize");
+    uint32_t service = FindExport(g_engine, "EngineService");
+    uint32_t terminate = FindExport(g_engine, "EngineTerminate");
+    uint32_t focus = FindExport(g_engine, "EngineWindowFocus");
+    if (!init || !service || !terminate || !focus) Fatal("engine exports missing");
+
+    Log("DllMain(PROCESS_ATTACH)");
+    uint32_t ok = GuestCall(g_engine.entry, {g_engine.base, 1, 0});
+    Log("DllMain returned %u", ok);
+    if (!ok) return 1;
+
+    uint32_t hwnd = HostWindow();
+    uint32_t params = HeapAlloc(16);
+    W32(params + 0, GuestStrdup(""));  // command line
+    W32(params + 4, hwnd);
+    W32(params + 8, hwnd);
+    Log("EngineInitialize");
+    uint32_t r = GuestCall(init, {params}) & 0xff;
+    Log("EngineInitialize returned %u", r);
+    if (!r) return 1;
+
+    for (uint64_t frame = 0;; ++frame) {
+        if ((frame & (frame - 1)) == 0) Log("frame %llu", (unsigned long long)frame);
+        bool keep = (GuestCall(service, {0, 0}) & 0xff) != 0;
+        GuestCall(focus, {1});
+        if (!keep) break;
+    }
+    GuestCall(terminate, {});
+    Log("EngineTerminate done");
+    return 0;
+}

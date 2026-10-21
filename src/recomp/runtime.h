@@ -2,7 +2,8 @@
  *
  * Every recompiled function has the signature `void f_<va>(Ctx*)` and works on an explicit guest CPU state.
  * Guest memory is addressed with 32-bit guest addresses relative to RecompMemoryBase: 0 when running inside the
- * original 32-bit process (prototype, hooked into the engine), a reserved 4 GiB region on 64-bit hosts. */
+ * original 32-bit process (prototype, hooked into the engine). The native host (src/native) builds with
+ * RECOMP_FLAT_MEMORY and keeps guest memory in the low 4 GiB of its own address space. */
 #ifndef PROTORE_RECOMP_RUNTIME_H
 #define PROTORE_RECOMP_RUNTIME_H
 
@@ -52,7 +53,12 @@ static inline int RecompDirect(uint32_t target) {
 }
 
 /* ---- memory ---- */
+#ifdef RECOMP_FLAT_MEMORY
+/* Native host: guest memory occupies the low 4 GiB of the host address space, so guest addresses are pointers. */
+static inline uint8_t* G(uint32_t a) { return (uint8_t*)(uintptr_t)a; }
+#else
 static inline uint8_t* G(uint32_t a) { return RecompMemoryBase + a; }
+#endif
 static inline uint8_t R8(uint32_t a) { return *G(a); }
 static inline uint16_t R16(uint32_t a) { uint16_t v; memcpy(&v, G(a), 2); return v; }
 static inline uint32_t R32(uint32_t a) { uint32_t v; memcpy(&v, G(a), 4); return v; }
