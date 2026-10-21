@@ -27,7 +27,7 @@ constexpr uint32_t kDI_OK = 0, kDIERR_Unsupported = 0x80004001u, kDIERR_DeviceNo
                    kDIERR_ObjectNotFound = 0x80070002u, kE_NoInterface = 0x80004002u, kE_Pointer = 0x80004003u;
 
 // DIDFT_* object type bits.
-constexpr uint32_t kRelAxis = 0x01, kAbsAxis = 0x02, kAxis = 0x03, kPshButton = 0x04, kButton = 0x0c,
+constexpr uint32_t kRelAxis = 0x01, kAxis = 0x03, kPshButton = 0x04, kButton = 0x0c,
                    kAnyInstance = 0x00ffff00u;
 constexpr uint32_t kAspectPosition = 0x100;  // DIDOI_ASPECTPOSITION
 

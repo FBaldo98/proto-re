@@ -6,7 +6,11 @@
 //         EngineWindowFocus(focused)
 //   EngineTerminate()
 #include <SDL2/SDL.h>
+#include <SDL2/SDL_main.h>  // Android: main() becomes SDL_main, called by SDLActivity
 #include <unistd.h>
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif
 
 #include <cstdarg>
 #include <cstdlib>
@@ -31,9 +35,13 @@ void Log(const char* fmt, ...) {
     std::lock_guard<std::mutex> lock(g_log_mutex);
     va_list ap;
     va_start(ap, fmt);
+#ifdef __ANDROID__
+    __android_log_vprint(ANDROID_LOG_INFO, "protore", fmt, ap);
+#else
     vfprintf(stderr, fmt, ap);
-    va_end(ap);
     fputc('\n', stderr);
+#endif
+    va_end(ap);
     if (g_log) {
         va_start(ap, fmt);
         vfprintf(g_log, fmt, ap);
@@ -66,6 +74,29 @@ using namespace native;
 
 int main(int argc, char** argv) {
     g_game_dir = argc > 1 ? argv[1] : getenv("PROTORE_GAME");
+#ifdef __ANDROID__
+    // The user copies the game into <app external files>/game (/sdcard/Android/data/<package>/files/game); logs,
+    // saves (native_c) and the DXVK caches go next to it.
+    static std::string android_game;
+    if (!g_game_dir) {
+        const char* base = SDL_AndroidGetExternalStoragePath();
+        if (!base) {
+            SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Prototype", SDL_GetError(), nullptr);
+            return 1;
+        }
+        android_game = std::string(base) + "/game";
+        g_game_dir = android_game.c_str();
+        if (chdir(base) != 0) return 1;
+        setenv("DXVK_STATE_CACHE_PATH", base, 0);
+        setenv("DXVK_LOG_PATH", base, 0);
+        std::string dll = android_game + "/prototypeenginef.dll";
+        if (access(dll.c_str(), R_OK) != 0) {
+            std::string msg = "Copy the game files (prototypeenginef.dll, *.rcf, ...) to\n" + android_game;
+            SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Prototype", msg.c_str(), nullptr);
+            return 1;
+        }
+    }
+#endif
     if (!g_game_dir) {
         fprintf(stderr, "usage: %s <game directory>\n", argv[0]);
         return 2;
