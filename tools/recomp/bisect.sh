@@ -42,7 +42,7 @@ run() {
     echo "$r / $r2"
 }
 
-lo=0 hi=$N   # invariant: prefix lo passes, prefix hi fails
+lo=${START_LO:-0} hi=$N   # invariant: prefix lo passes, prefix hi fails
 echo "functions: $N"
 r=$(run $hi); echo "all: $r"
 case $r in pass*) echo "whole engine passes"; exit 0;; esac
