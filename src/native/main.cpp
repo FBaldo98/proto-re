@@ -12,6 +12,7 @@
 #include <android/log.h>
 #endif
 
+#include <atomic>
 #include <cerrno>
 #include <cstdarg>
 #include <cstdlib>
@@ -65,6 +66,7 @@ void Fatal(const char* fmt, ...) {
 
 uint32_t HostWindow();  // user32.cpp
 void InitClientSize(int window_w, int window_h);
+void StartWatchdog(std::atomic<uint64_t>* frames);  // watchdog.cpp
 void InitD3D9Bridge();  // d3d9.cpp
 void InitInput(uint32_t keyboard_service, uint32_t mouse_service);  // input.cpp
 void ForwardInput(const SDL_Event& e);
@@ -207,7 +209,10 @@ int main(int argc, char** argv) {
             pos = end == std::string::npos ? all.size() : end + 1;
         }
     }
+    static std::atomic<uint64_t> frames{0};
+    StartWatchdog(&frames);
     for (uint64_t frame = 0;; ++frame) {
+        frames.store(frame, std::memory_order_relaxed);
         for (const Tap& t : taps) {
             if (t.key == SDL_SCANCODE_UNKNOWN) continue;
             if (frame == t.frame) InjectKey(t.key, true);

@@ -45,6 +45,7 @@ GuestThread* AttachThread(uint32_t stack_size) {
     W32(t->teb + kTebClientId, 0x10);
     W32(t->teb + kTebClientId + 4, t->id);
     tl_thread = t;
+    RegisterGuestThread();
     return t;
 }
 

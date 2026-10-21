@@ -269,16 +269,50 @@ class FunctionCompiler:
         off = addr - self.va
         if off < 0 or off >= self.size:
             return None
-        for i in self.md.disasm(self.code[off:off + 16], addr, count=1):
+        # An instruction starting inside the extent is decoded whole even if it ends past it (Ghidra's sizes can cut
+        # through the last instruction).
+        for i in self.md.disasm(self.pe.get_data(addr - BASE, 16), addr, count=1):
             return i
         return None
 
-    def jump_table(self, ins):
-        """Targets of `jmp dword ptr [reg*4 + table]`, read from the image while they stay inside the function."""
+    def jump_table(self, ins, recent=()):
+        """Targets of `jmp dword ptr [reg*4 + table]`.
+
+        With the switch's bound in view (`cmp reg, N` + `ja` before the jump) exactly N+1 entries are read, and
+        MSVC's two-level form (`movzx reg, byte ptr [reg + index]` right before the jump) reads the byte index table
+        first. Targets past the function's extent grow it: Ghidra sometimes splits a function at a case label.
+        Without a bound, entries are read while they stay inside the function."""
         op = ins.operands[0]
         if op.type != X.X86_OP_MEM or op.mem.base != 0 or op.mem.index == 0 or op.mem.scale != 4:
             return None
         table = op.mem.disp & 0xffffffff
+        reg = ins.reg_name(op.mem.index)
+        bound = None
+        byte_index = None
+        for prev in reversed(recent[-8:]):
+            ops = prev.operands
+            if (prev.mnemonic == "movzx" and len(ops) == 2 and ops[0].type == X.X86_OP_REG and
+                    ins.reg_name(ops[0].reg) == reg and ops[1].type == X.X86_OP_MEM and ops[1].size == 1 and
+                    ops[1].mem.index == 0 and ops[1].mem.base != 0):
+                byte_index = (ops[1].mem.disp & 0xffffffff, ins.reg_name(ops[1].mem.base))
+                reg = byte_index[1]
+            elif (prev.mnemonic == "cmp" and len(ops) == 2 and ops[0].type == X.X86_OP_REG and
+                  ins.reg_name(ops[0].reg) == reg and ops[1].type == X.X86_OP_IMM):
+                bound = (ops[1].imm & 0xffffffff) + 1
+                break
+        if bound is not None and bound <= 4096:
+            if byte_index is not None:
+                idx = self.pe.get_data(byte_index[0] - BASE, bound)
+                count = max(idx) + 1
+            else:
+                count = bound
+            targets = [int.from_bytes(self.pe.get_data(table - BASE + 4 * k, 4), "little") for k in range(count)]
+            if all(self.text_lo <= t < self.text_hi for t in targets):
+                end = max(targets) + 16
+                if end > self.va + self.size:
+                    self.size = end - self.va
+                    self.code = self.pe.get_data(self.va - BASE, self.size)
+                return targets
         targets = []
         for k in range(1024):
             try:
@@ -293,15 +327,20 @@ class FunctionCompiler:
     def decode(self):
         decoded = {}
         work = [self.va]
+        text = self.pe.sections[0]
+        self.text_lo = BASE + text.VirtualAddress
+        self.text_hi = self.text_lo + text.Misc_VirtualSize
         self.traps = set()  # addresses where decoding failed or hit int3: reaching them is a trap
         while work:
             addr = work.pop()
+            recent = []  # the straight-line run leading here (switch bound detection)
             while addr not in decoded and addr not in self.traps:
                 i = self.decode_one(addr)
                 if i is None or i.mnemonic == "int3":
                     self.traps.add(addr)
                     break
                 decoded[addr] = i
+                recent.append(i)
                 nxt = addr + i.size
                 m = i.mnemonic
                 if i.group(capstone.CS_GRP_JUMP):
@@ -310,7 +349,7 @@ class FunctionCompiler:
                         if self.inside(op.imm):
                             work.append(op.imm)
                     elif m == "jmp":
-                        table = self.jump_table(i)
+                        table = self.jump_table(i, recent)
                         if table:
                             self.table_targets[addr] = table
                             work.extend(table)
@@ -360,7 +399,8 @@ class FunctionCompiler:
             return self.locked_or_plain(ins, base)
 
         if base in ("nop", "int3", "prefetcht0", "prefetchnta", "wait", "emms"):
-            return "/* " + m + " */" if base == "nop" else f'RecompUnimplemented(c, 0x{ins.address:08x}u, "int3"); return;'
+            # Hints and FPU/MMX state syncs have no effect on the emulated state; only int3 traps.
+            return "/* " + m + " */" if base != "int3" else f'RecompUnimplemented(c, 0x{ins.address:08x}u, "int3"); return;'
         if base == "mov" or base == "movabs":
             return self.write(ins, ops[0], self.read(ins, ops[1], bits))
         if base in ("movzx", "movsx"):
@@ -1049,8 +1089,7 @@ class FunctionCompiler:
                 self.unsupported[str(e)] += 1
                 line = f'RecompUnimplemented(c, 0x{i.address:08x}u, "{i.mnemonic} {i.op_str}"); return;'
             body.append((i, line))
-        out = [f"void f_{t:08x}(Ctx* c);" for t in sorted(self.direct_calls - {self.va})]
-        out.append(f"void f_{self.va:08x}(Ctx* c) {{")
+        out = [f"void f_{self.va:08x}(Ctx* c) {{"]
         trap_labels = set()
         # Fall-through into an instruction that is not next in the output (overlapping decodes) needs its label.
         for n, (i, _) in enumerate(body):
@@ -1069,6 +1108,10 @@ class FunctionCompiler:
                 if following != nxt:
                     if nxt in decoded:
                         out.append(f"    goto L_{nxt:08x};")
+                    elif not self.inside(nxt):
+                        # Falls off its extent into the next entry: Ghidra split one body in two (or more), the
+                        # code simply continues there.
+                        out.append(f"    {self.jump_to(nxt)}")
                     else:
                         out.append(f'    RecompUnimplemented(c, 0x{nxt:08x}u, "fell into undecoded bytes"); return;')
         # Branch targets that were never decoded (int3 or undecodable): traps.
@@ -1078,7 +1121,9 @@ class FunctionCompiler:
         if not self.ins:
             out.append(f'    RecompUnimplemented(c, 0x{self.va:08x}u, "no decodable instruction"); return;')
         out.append("}")
-        return "\n".join(out)
+        # Prototypes last: tail jumps added while assembling the body are direct calls too.
+        protos = [f"void f_{t:08x}(Ctx* c);" for t in sorted(self.direct_calls - {self.va})]
+        return "\n".join(protos + out)
 
 
 def ops_are_xmm(ins):

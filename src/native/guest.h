@@ -47,6 +47,8 @@ struct GuestThread {
 GuestThread* CurrentThread();
 // Creates the guest state for the calling host thread (main thread or a thread started by CreateThread).
 GuestThread* AttachThread(uint32_t stack_size);
+// Hang diagnostics (watchdog.cpp): guest threads register themselves; the watchdog watches the frame counter.
+void RegisterGuestThread();
 
 // ---- calls into guest code ----
 // Calls the recompiled function at `va` with stdcall/cdecl arguments on the current guest thread's stack; returns

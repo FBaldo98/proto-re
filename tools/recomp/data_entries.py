@@ -61,6 +61,18 @@ def main():
             v = int.from_bytes(data[o:o + 4], "little")
             if lo <= v < hi and v not in ends and not inside(v) and looks_like_start(v):
                 found.add(v)
+    # Functions Ghidra merged into the body of the previous one: MSVC pads between functions with int3 and starts the
+    # next one 16-byte aligned; int3 never occurs inside a function body.
+    merged = 0
+    for off in range(16, len(code) - 1, 16):
+        if code[off] == 0xCC or code[off - 1] != 0xCC:
+            continue
+        v = lo + off
+        if v not in ends and inside(v):
+            found.add(v)
+            merged += 1
+    print(f"{merged} starts inside Ghidra function bodies (merged functions)")
+
     # Thunk targets: the real function, often never referenced by anything else.
     for v in list(found) + starts:
         t = jmp_target(v)

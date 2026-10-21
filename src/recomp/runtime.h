@@ -59,6 +59,46 @@ static inline uint8_t* G(uint32_t a) { return (uint8_t*)(uintptr_t)a; }
 #else
 static inline uint8_t* G(uint32_t a) { return RecompMemoryBase + a; }
 #endif
+#if defined(RECOMP_TSO)
+/* Weakly ordered hosts (arm64): x86 code relies on total store order (a store is never seen before an earlier one,
+ * a load never runs ahead of an earlier load), e.g. a worker that sees a "ready" flag before the data it guards.
+ * Guest loads are acquire and stores release, which gives the same guarantees; unaligned accesses (rare) use
+ * plain copies fenced on the right side. */
+#define RECOMP_ALIGNED(a, n) ((((uintptr_t)G(a)) & ((n) - 1)) == 0)
+static inline uint8_t R8(uint32_t a) { return __atomic_load_n(G(a), __ATOMIC_ACQUIRE); }
+static inline uint16_t R16(uint32_t a) {
+    if (RECOMP_ALIGNED(a, 2)) return __atomic_load_n((uint16_t*)G(a), __ATOMIC_ACQUIRE);
+    uint16_t v; memcpy(&v, G(a), 2); __atomic_thread_fence(__ATOMIC_ACQUIRE); return v;
+}
+static inline uint32_t R32(uint32_t a) {
+    if (RECOMP_ALIGNED(a, 4)) return __atomic_load_n((uint32_t*)G(a), __ATOMIC_ACQUIRE);
+    uint32_t v; memcpy(&v, G(a), 4); __atomic_thread_fence(__ATOMIC_ACQUIRE); return v;
+}
+static inline uint64_t R64(uint32_t a) {
+    if (RECOMP_ALIGNED(a, 8)) return __atomic_load_n((uint64_t*)G(a), __ATOMIC_ACQUIRE);
+    uint64_t v; memcpy(&v, G(a), 8); __atomic_thread_fence(__ATOMIC_ACQUIRE); return v;
+}
+static inline float RF32(uint32_t a) { uint32_t b = R32(a); float v; memcpy(&v, &b, 4); return v; }
+static inline double RF64(uint32_t a) { uint64_t b = R64(a); double v; memcpy(&v, &b, 8); return v; }
+static inline void W8(uint32_t a, uint8_t v) { __atomic_store_n(G(a), v, __ATOMIC_RELEASE); }
+static inline void W16(uint32_t a, uint16_t v) {
+    if (RECOMP_ALIGNED(a, 2)) { __atomic_store_n((uint16_t*)G(a), v, __ATOMIC_RELEASE); return; }
+    __atomic_thread_fence(__ATOMIC_RELEASE); memcpy(G(a), &v, 2);
+}
+static inline void W32(uint32_t a, uint32_t v) {
+    if (RECOMP_ALIGNED(a, 4)) { __atomic_store_n((uint32_t*)G(a), v, __ATOMIC_RELEASE); return; }
+    __atomic_thread_fence(__ATOMIC_RELEASE); memcpy(G(a), &v, 4);
+}
+static inline void W64(uint32_t a, uint64_t v) {
+    if (RECOMP_ALIGNED(a, 8)) { __atomic_store_n((uint64_t*)G(a), v, __ATOMIC_RELEASE); return; }
+    __atomic_thread_fence(__ATOMIC_RELEASE); memcpy(G(a), &v, 8);
+}
+static inline void WF32(uint32_t a, float v) { uint32_t b; memcpy(&b, &v, 4); W32(a, b); }
+static inline void WF64(uint32_t a, double v) { uint64_t b; memcpy(&b, &v, 8); W64(a, b); }
+/* The guest stack is private to its thread: pushes and pops stay plain. */
+static inline void StackW32(uint32_t a, uint32_t v) { memcpy(G(a), &v, 4); }
+static inline uint32_t StackR32(uint32_t a) { uint32_t v; memcpy(&v, G(a), 4); return v; }
+#else
 static inline uint8_t R8(uint32_t a) { return *G(a); }
 static inline uint16_t R16(uint32_t a) { uint16_t v; memcpy(&v, G(a), 2); return v; }
 static inline uint32_t R32(uint32_t a) { uint32_t v; memcpy(&v, G(a), 4); return v; }
@@ -72,8 +112,12 @@ static inline void W64(uint32_t a, uint64_t v) { memcpy(G(a), &v, 8); }
 static inline void WF32(uint32_t a, float v) { memcpy(G(a), &v, 4); }
 static inline void WF64(uint32_t a, double v) { memcpy(G(a), &v, 8); }
 
-static inline void Push32(Ctx* c, uint32_t v) { c->esp -= 4; W32(c->esp, v); }
-static inline uint32_t Pop32(Ctx* c) { uint32_t v = R32(c->esp); c->esp += 4; return v; }
+#define StackW32 W32
+#define StackR32 R32
+#endif
+
+static inline void Push32(Ctx* c, uint32_t v) { c->esp -= 4; StackW32(c->esp, v); }
+static inline uint32_t Pop32(Ctx* c) { uint32_t v = StackR32(c->esp); c->esp += 4; return v; }
 
 /* ---- flags ---- */
 static inline uint8_t Parity(uint32_t v) {
