@@ -91,14 +91,27 @@ class Unsupported(Exception):
 
 
 def load_functions():
+    """Non-thunk function entries -> decoding extent. Ghidra's size counts the addresses of the body, which can
+    be smaller than its extent (e.g. a loop tail after the counted range), so a function may be decoded up to the
+    next function entry (thunks included); decoding only follows control flow, so data in between is never read."""
     sizes = {}
+    starts = []
     with open(os.path.join(ROOT, "re", "functions.csv")) as f:
         next(f)
         for row in f:
             p = row.split(",")
+            va = int(p[0], 16)
+            starts.append(va)
             if p[2] == "false":
-                sizes[int(p[0], 16)] = int(p[1])
-    return sizes
+                sizes[va] = int(p[1])
+    starts.sort()
+    import bisect
+    extents = {}
+    for va, size in sizes.items():
+        i = bisect.bisect_right(starts, va)
+        nxt = starts[i] if i < len(starts) else va + size
+        extents[va] = max(size, nxt - va)
+    return extents
 
 
 class FunctionCompiler:
