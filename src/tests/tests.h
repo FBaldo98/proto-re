@@ -16,5 +16,6 @@ void TestCementLookup(protore::DiffResult* r);
 void TestCementFileRange(protore::DiffResult* r);
 void TestCementState(protore::DiffResult* r);
 void TestMemory(protore::DiffResult* r);
+void TestCementLoad(protore::DiffResult* r);
 
 }  // namespace tests

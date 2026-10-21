@@ -3,7 +3,9 @@
 #include <cstring>
 
 #include "../host/hooks.h"
+#include "file_system.h"
 #include "name_hash.h"
+#include "report.h"
 
 namespace core {
 
@@ -50,6 +52,42 @@ Fn Slot(void* object, int index) {
     void** vtable = *static_cast<void***>(object);
     return reinterpret_cast<Fn>(vtable[index]);
 }
+
+// Fields used by the load state machine.
+constexpr uint32_t kLoadInterfaceOffset = 0x04;       // the interface LoadStep is called on
+constexpr uint32_t kBufferHeapOffset = 0x0c;          // heap for the drive's shared I/O buffer
+constexpr uint32_t kRegistrationDriveOffset = 0x1c;   // drive the library registers with (owns an IoBufferHolder)
+constexpr uint32_t kStreamOffset = 0x20;              // the opened .rcf stream (same object FindAndOpen passes as drive)
+constexpr uint32_t kHeaderSize = 0x3c;
+constexpr uint32_t kDirectoryOffsetOffset = 0x4c;     // header +0x24
+constexpr uint32_t kDirectorySizeOffset = 0x50;       // header +0x28
+constexpr uint32_t kNeedsIoBufferOffset = 0x5c;       // header +0x34: nonzero = acquire the drive's I/O buffer
+constexpr uint32_t kRevalidateOffset = 0x78;          // byte: phase 2 re-checks the stream and header
+constexpr uint32_t kDirectoryHeapOffset = 0x7c;
+constexpr uint32_t kDirectoryAlignment = 0x10;
+constexpr uint32_t kIoBufferGranularity = 0x10;
+
+// Stream virtual slots used by the loader.
+constexpr int kStreamSlotRead = 3;          // read(buffer, size, flag)
+constexpr int kStreamSlotSeek = 5;          // seek(position)
+constexpr int kStreamSlotAlignment = 16;    // alignment()
+constexpr int kStreamSlotQueue = 18;        // queue(callback interface, phase tag)
+constexpr int kStreamSlotError = 23;        // error() -> 0 when the last read succeeded
+constexpr int kStreamSlotIsOpen = 24;       // is_open() -> bool
+constexpr int kStreamSlotSetLoading = 31;   // set_loading(bool)
+
+// Per-site enable flag of the registration-drive assert in phase 2, and its report arguments.
+constexpr uint32_t kRegistrationAssertFlagRva = 0x010bd89d;
+constexpr int kRegistrationAssertLine = 0x230;
+
+// Engine entry points called through their live addresses.
+constexpr uint32_t kValidateHeaderRva = 0x006503c0;
+constexpr uint32_t kSetStateRva = 0x00650410;
+constexpr uint32_t kAllocRva = 0x0063a8d0;
+constexpr uint32_t kHolderOfDriveRva = 0x0064ff10;    // drive -> its IoBufferHolder (drive + 0x14)
+constexpr uint32_t kAcquireRva = 0x006506b0;
+constexpr uint32_t kRegisterLibraryRva = 0x0064fef0;  // thiscall(drive, library): adjusts to the holder, registers
+constexpr uint32_t kReportRva = 0x0063c750;
 
 // Owner sub-object (FUN_1064ff10 returns owner + 0x14) and the two words FUN_10650690 copies out of it.
 constexpr uint32_t kOwnerSubOffset = 0x14;
@@ -101,6 +139,120 @@ void __thiscall CementLibrarySetState(CementLibrary* self, int32_t state) {
     Slot<ReleaseFn>(completion, kCompletionSlotRelease)(completion);
     SetField<void*>(self, kCompletionOffset, nullptr);
     SetField<uint32_t>(self, kCompletionArgOffset, 0);
+}
+
+namespace {
+
+using StreamReadFn = void(__thiscall*)(void* stream, void* buffer, uint32_t size, int32_t flag);
+using StreamSeekFn = void(__thiscall*)(void* stream, uint32_t position);
+using StreamAlignmentFn = uint32_t(__thiscall*)(void* stream);
+using StreamQueueFn = void(__thiscall*)(void* stream, void* callback, int32_t tag);
+using StreamErrorFn = int32_t(__thiscall*)(void* stream);
+using StreamIsOpenFn = bool(__thiscall*)(void* stream);
+using StreamSetLoadingFn = void(__thiscall*)(void* stream, int32_t loading);
+
+using ValidateHeaderFn = bool(__thiscall*)(CementLibrary*);
+using SetStateFn = void(__thiscall*)(CementLibrary*, int32_t);
+using AllocFn = void*(__cdecl*)(uint32_t, uint32_t, uint32_t);
+using HolderOfDriveFn = IoBufferHolder*(__thiscall*)(void* drive);
+using AcquireFn = void(__thiscall*)(IoBufferHolder*, uint32_t, uint32_t, uint32_t);
+using RegisterLibraryFn = void(__thiscall*)(void* drive, CementLibrary* library);
+using ReportFn = int(__cdecl*)(int, const char*, const char*, int, const char*, const char*, ...);
+
+template <typename Fn>
+Fn Engine(uint32_t rva) {
+    return reinterpret_cast<Fn>(protore::EngineAddress(rva));
+}
+
+// The stream's interface pointer for a library, as the original converts it: null stays null.
+void* LoadInterfaceOf(CementLibrary* library) {
+    return library ? reinterpret_cast<uint8_t*>(library) + kLoadInterfaceOffset : nullptr;
+}
+
+template <typename Fn, typename... Args>
+auto CallStream(void* stream, int slot, Args... args) {
+    return Slot<Fn>(stream, slot)(stream, args...);
+}
+
+void Fail(CementLibrary* library) {
+    Engine<SetStateFn>(kSetStateRva)(library, kCementStateFailed);
+}
+
+}  // namespace
+
+void __thiscall CementLibraryLoadStep(void* load_interface, int32_t phase) {
+    auto* library = reinterpret_cast<CementLibrary*>(static_cast<uint8_t*>(load_interface) - kLoadInterfaceOffset);
+    if (Field<int32_t>(library, kStateOffset) == kCementStateLoaded) {
+        Fail(library);
+        return;
+    }
+    // The original re-reads the stream pointer before every call on it.
+    auto stream = [library] { return Field<void*>(library, kStreamOffset); };
+    auto* header = reinterpret_cast<uint8_t*>(library) + kHeaderOffset;
+
+    if (phase == kCementPhaseStart) {
+        if (!CallStream<StreamIsOpenFn>(stream(), kStreamSlotIsOpen)) {
+            Fail(library);
+            return;
+        }
+        CallStream<StreamSetLoadingFn>(stream(), kStreamSlotSetLoading, 1);
+        CallStream<StreamSeekFn>(stream(), kStreamSlotSeek, 0);
+        CallStream<StreamReadFn>(stream(), kStreamSlotRead, header, kHeaderSize, 1);
+        CallStream<StreamQueueFn>(stream(), kStreamSlotQueue, LoadInterfaceOf(library), kCementPhaseHeader);
+        return;
+    }
+
+    if (phase == kCementPhaseHeader) {
+        if (CallStream<StreamErrorFn>(stream(), kStreamSlotError) != 0) {
+            return;
+        }
+        if (!Engine<ValidateHeaderFn>(kValidateHeaderRva)(library)) {
+            Fail(library);
+            return;
+        }
+        void* entries = Engine<AllocFn>(kAllocRva)(Field<uint32_t>(library, kDirectoryHeapOffset),
+                                                   Field<uint32_t>(library, kDirectorySizeOffset), kDirectoryAlignment);
+        SetField<void*>(library, kEntriesOffset, entries);
+        CallStream<StreamSeekFn>(stream(), kStreamSlotSeek, Field<uint32_t>(library, kDirectoryOffsetOffset));
+        CallStream<StreamReadFn>(stream(), kStreamSlotRead, Field<void*>(library, kEntriesOffset),
+                                                    Field<uint32_t>(library, kDirectorySizeOffset), 1);
+        CallStream<StreamQueueFn>(stream(), kStreamSlotQueue, LoadInterfaceOf(library), kCementPhaseDirectory);
+        return;
+    }
+
+    if (phase != kCementPhaseDirectory) {
+        return;
+    }
+    if (Field<uint8_t>(library, kRevalidateOffset)) {
+        if (!CallStream<StreamIsOpenFn>(stream(), kStreamSlotIsOpen) ||
+            !Engine<ValidateHeaderFn>(kValidateHeaderRva)(library)) {
+            Fail(library);
+            return;
+        }
+    } else if (CallStream<StreamErrorFn>(stream(), kStreamSlotError) != 0) {
+        Fail(library);
+        return;
+    }
+    CallStream<StreamSetLoadingFn>(stream(), kStreamSlotSetLoading, 0);
+
+    void* registration_drive = Field<void*>(library, kRegistrationDriveOffset);
+    if (Field<uint32_t>(library, kNeedsIoBufferOffset) != 0) {
+        auto* assert_enabled = static_cast<volatile uint8_t*>(protore::EngineAddress(kRegistrationAssertFlagRva));
+        if (*assert_enabled && registration_drive != Field<void*>(library, kOwnerOffset)) {
+            if (Engine<ReportFn>(kReportRva)(kReportAssert, " oldassert ",
+                                             "..\\..\\..\\code\\core\\src\\file\\common\\cementer.cpp",
+                                             kRegistrationAssertLine, "m_pRegistrationDrive == m_pDrive",
+                                             nullptr) == kReportDisableSite) {
+                *assert_enabled = 0;
+            }
+        }
+        uint32_t heap = Field<uint32_t>(library, kBufferHeapOffset);
+        uint32_t alignment = CallStream<StreamAlignmentFn>(stream(), kStreamSlotAlignment);
+        IoBufferHolder* holder = Engine<HolderOfDriveFn>(kHolderOfDriveRva)(Field<void*>(library, kRegistrationDriveOffset));
+        Engine<AcquireFn>(kAcquireRva)(holder, heap, alignment, kIoBufferGranularity);
+    }
+    Engine<RegisterLibraryFn>(kRegisterLibraryRva)(Field<void*>(library, kRegistrationDriveOffset), library);
+    Engine<SetStateFn>(kSetStateRva)(library, kCementStateLoaded);
 }
 
 const void* CementFindEntry(const void* entries, uint32_t count, uint32_t key, uint32_t stride) {

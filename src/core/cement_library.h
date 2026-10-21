@@ -43,6 +43,18 @@ bool __thiscall CementLibraryValidateHeader(CementLibrary* self);
 // +0x70, calls its slot 3 with the word at +0x74, then its slot 1, and clears both fields.
 void __thiscall CementLibrarySetState(CementLibrary* self, int32_t state);
 
+// Phases of the asynchronous load. The stream calls the library back (through its interface at +4) with the tag
+// given when the read was queued.
+enum CementLoadPhase : int32_t {
+    kCementPhaseStart = 0,      // queue the header read
+    kCementPhaseHeader = 1,     // header arrived: validate, allocate and queue the directory read
+    kCementPhaseDirectory = 2,  // directory arrived: acquire the drive's I/O buffer, register, mark loaded
+};
+
+// Original: CementLibrary vfunction4 at FUN_106508e0 (rva 0x006508e0), thiscall on the library's interface
+// sub-object (library + 4), ret 4. One step of the load state machine; see cement_library.cpp for the phases.
+void __thiscall CementLibraryLoadStep(void* load_interface, int32_t phase);
+
 // Original: FUN_106502c0 (rva 0x006502c0), cdecl. Binary search over `count` records of `stride` bytes whose
 // first word is an unsigned key; returns the matching record or null. The midpoint is computed as
 // (hi >> 1) + (lo >> 1) + (lo & hi & 1) and the probe order must be kept: with duplicate keys it decides which

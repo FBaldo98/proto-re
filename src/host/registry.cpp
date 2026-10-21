@@ -57,6 +57,9 @@ Hook g_hooks[] = {
     // push esi; mov esi,ecx; cmp dword ptr [esi+34h],0
     {"core::IoBufferHolderAcquire", 0x006506b0, reinterpret_cast<void*>(&core::IoBufferHolderAcquire),
      {0x56, 0x8b, 0xf1, 0x83, 0x7e, 0x34, 0x00}, 7, 7, true, {}},
+    // push esi; mov esi,ecx; cmp dword ptr [esi+20h],1
+    {"core::CementLibraryLoadStep", 0x006508e0, reinterpret_cast<void*>(&core::CementLibraryLoadStep),
+     {0x56, 0x8b, 0xf1, 0x83, 0x7e, 0x20, 0x01}, 7, 7, true, {}},
 };
 
 }  // namespace
