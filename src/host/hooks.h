@@ -53,6 +53,10 @@ void* OriginalFunction(uint32_t rva);
 // Patches every enabled hook; returns number installed, logs each failure.
 int InstallHooks(Hook* hooks, size_t count);
 
+// True while a TestDetour replaces the function at engine address `va`; recompiled code then calls through the
+// engine entry point instead of calling the recompiled function directly, so tests can observe the call.
+bool TestDetourActive(uint32_t va);
+
 // Test-only detour: for its lifetime the function at `rva` is replaced by `replacement`, even if a reconstruction
 // hook is installed there (the hook is suspended and restored afterwards).
 class TestDetour {
@@ -67,6 +71,7 @@ public:
 private:
     Hook* suspended_ = nullptr;
     Detour detour_;
+    uint32_t rva_ = 0;
 };
 
 void Log(const char* fmt, ...);

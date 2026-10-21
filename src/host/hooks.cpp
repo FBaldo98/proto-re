@@ -1,5 +1,7 @@
 #include "hooks.h"
 
+#include "../recomp/bridge.h"
+
 #include <windows.h>
 
 #include <cstdarg>
@@ -152,8 +154,30 @@ void DetourDetach(Detour* d) {
     }
 }
 
+namespace {
+
+// Engine addresses of active test detours (tests nest only a handful).
+constexpr size_t kMaxTestDetours = 64;
+uint32_t g_test_detours[kMaxTestDetours];
+size_t g_test_detour_count = 0;
+
+}  // namespace
+
+bool TestDetourActive(uint32_t va) {
+    for (size_t i = 0; i < g_test_detour_count; ++i) {
+        if (g_test_detours[i] == va) {
+            return true;
+        }
+    }
+    return false;
+}
+
 TestDetour::TestDetour(uint32_t rva, size_t stolen_len, const uint8_t* expected, size_t expected_len,
                        void* replacement, int rel32_at) {
+    rva_ = rva;
+    if (g_test_detour_count < kMaxTestDetours) {
+        g_test_detours[g_test_detour_count++] = static_cast<uint32_t>(kEngineImageBase) + rva;
+    }
     for (size_t i = 0; i < g_hook_count; ++i) {
         if (g_hooks[i].rva == rva && g_hooks[i].detour.target) {
             suspended_ = &g_hooks[i];
@@ -168,6 +192,12 @@ TestDetour::TestDetour(uint32_t rva, size_t stolen_len, const uint8_t* expected,
 
 TestDetour::~TestDetour() {
     DetourDetach(&detour_);
+    for (size_t i = g_test_detour_count; i-- > 0;) {
+        if (g_test_detours[i] == static_cast<uint32_t>(kEngineImageBase) + rva_) {
+            g_test_detours[i] = g_test_detours[--g_test_detour_count];
+            break;
+        }
+    }
     if (suspended_) {
         Hook& h = *suspended_;
         if (!DetourAttach(&h.detour, h.rva, h.stolen_len, h.expected, h.expected_len, h.replacement, h.rel32_at)) {
@@ -182,16 +212,37 @@ int InstallHooks(Hook* hooks, size_t count) {
     // PROTORE_ONLY=<name> installs just that hook, for bisecting behaviour changes to one function.
     char only[128] = "";
     GetEnvironmentVariableA("PROTORE_ONLY", only, sizeof(only));
-    // PROTORE_SKIP=<prefix> leaves every hook whose name starts with the prefix uninstalled.
-    char skip[128] = "";
+    // PROTORE_SKIP=<prefix>[,<prefix>...] leaves every hook whose name starts with one of the prefixes uninstalled.
+    char skip[512] = "";
     GetEnvironmentVariableA("PROTORE_SKIP", skip, sizeof(skip));
-    const size_t skip_len = strlen(skip);
+    auto skipped = [&skip](const char* name) {
+        for (const char* p = skip; *p;) {
+            const char* end = strchr(p, ',');
+            size_t len = end ? static_cast<size_t>(end - p) : strlen(p);
+            if (len && strncmp(name, p, len) == 0) {
+                return true;
+            }
+            p += len + (end ? 1 : 0);
+        }
+        return false;
+    };
+    const bool recomp = GetEnvironmentVariableA("PROTORE_RECOMP", nullptr, 0) != 0;
+    int recompiled = 0;
     int installed = 0;
     for (size_t i = 0; i < count; ++i) {
         Hook& h = hooks[i];
-        if (!h.enabled || (only[0] && strcmp(only, h.name) != 0) ||
-            (skip_len && strncmp(h.name, skip, skip_len) == 0)) {
+        if ((only[0] && strcmp(only, h.name) != 0) || skipped(h.name)) {
             continue;
+        }
+        // PROTORE_RECOMP=1 runs the statically recompiled version instead of the hand reconstruction when one
+        // exists for this function (also for hand reconstructions that are still disabled).
+        void* stub = recomp ? RecompEntryStub(static_cast<uint32_t>(kEngineImageBase) + h.rva) : nullptr;
+        if (!h.enabled && !stub) {
+            continue;
+        }
+        if (stub) {
+            h.replacement = stub;
+            ++recompiled;
         }
         if (!DetourAttach(&h.detour, h.rva, h.stolen_len, h.expected, h.expected_len, h.replacement, h.rel32_at)) {
             Log("hook %s: not installed at rva 0x%08x (bytes mismatch or protect failure)", h.name, h.rva);
@@ -199,6 +250,9 @@ int InstallHooks(Hook* hooks, size_t count) {
         }
         Log("hook %s: installed at rva 0x%08x", h.name, h.rva);
         ++installed;
+    }
+    if (recomp) {
+        Log("recomp: %d hooks run recompiled code", recompiled);
     }
     return installed;
 }
