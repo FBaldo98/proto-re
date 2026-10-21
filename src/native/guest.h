@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <initializer_list>
+#include <string>
 
 #include "../recomp/runtime.h"
 
@@ -102,5 +103,9 @@ extern uint32_t g_engine_lo, g_engine_hi;
 
 // Directory with the game files (cwd for the engine's relative paths).
 extern const char* g_game_dir;
+
+// ---- settings (config.cpp): protore.ini, overridden by PROTORE_<KEY> environment variables ----
+std::string Setting(const char* key, const char* def);
+int SettingInt(const char* key, int def);
 
 }  // namespace native

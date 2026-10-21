@@ -36,7 +36,9 @@ struct InterfaceDef {
 
 std::recursive_mutex g_mutex;
 std::vector<void*> g_hosts;                      // index -> host object
-std::unordered_map<void*, uint32_t> g_guest_of;  // host object -> guest object
+// host object -> guest object. Child surfaces die with their texture without a Release through the bridge, so an
+// entry can be stale: a new object at the same address with another interface must not reuse it.
+std::unordered_map<void*, uint32_t> g_guest_of;
 std::map<std::string, uint32_t> g_vtables;       // interface name -> guest vtable
 
 template <typename T>
@@ -53,10 +55,10 @@ T* Unwrap(uint32_t guest) {
 uint32_t WrapAs(void* host, const char* iface) {
     if (!host) return 0;
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
-    auto it = g_guest_of.find(host);
-    if (it != g_guest_of.end()) return it->second;
     auto vt = g_vtables.find(iface);
     if (vt == g_vtables.end()) Fatal("d3d9: no vtable for %s", iface);
+    auto it = g_guest_of.find(host);
+    if (it != g_guest_of.end() && R32(it->second) == vt->second) return it->second;
     uint32_t g = HeapAlloc(16);
     W32(g, vt->second);
     W32(g + 4, uint32_t(g_hosts.size()));
@@ -68,7 +70,8 @@ uint32_t WrapAs(void* host, const char* iface) {
 void Forget(uint32_t guest) {
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
     uint32_t index = R32(guest + 4);
-    g_guest_of.erase(g_hosts[index]);
+    auto it = g_guest_of.find(g_hosts[index]);
+    if (it != g_guest_of.end() && it->second == guest) g_guest_of.erase(it);
     g_hosts[index] = nullptr;
     W32(guest, 0);
     // The guest block is not reused: a stale guest pointer then faults on a null vtable instead of aliasing.
@@ -117,11 +120,17 @@ void ReturnFStd(Ctx* c, float v, int args) {
     c->esp += 4 * args;
 }
 
+void ForgetResource(void* host);  // lock shadows and texture adaptation state of a released object
+
 template <typename T>
 void ReleaseImpl(Ctx* c) {
     uint32_t g = Arg(c, 0);
-    ULONG r = Host<T>(g)->Release();
-    if (r == 0) Forget(g);
+    T* host = Host<T>(g);
+    ULONG r = host->Release();
+    if (r == 0) {
+        ForgetResource(host);
+        Forget(g);
+    }
     Return(c, r, 1);
 }
 
@@ -157,7 +166,13 @@ D3DPRESENT_PARAMETERS ToHost(uint32_t g) {
     p.Flags = R32(g + 44);
     p.FullScreen_RefreshRateInHz = R32(g + 48);
     p.PresentationInterval = R32(g + 52);
-    if (getenv("PROTORE_WINDOWED")) {
+    // Android: the SDL window already covers the screen and exclusive fullscreen has no meaning there.
+#ifdef __ANDROID__
+    const bool windowed = true;
+#else
+    const bool windowed = getenv("PROTORE_WINDOWED") != nullptr;
+#endif
+    if (windowed) {
         p.Windowed = TRUE;
         p.FullScreen_RefreshRateInHz = 0;
     }
@@ -242,10 +257,254 @@ void LockRectCommon(Ctx* c, void* object, uint32_t sub, HRESULT hr, const D3DLOC
     Return(c, uint32_t(hr), args);
 }
 
+// ---- texture adaptation for mobile GPUs ----
+// Invisible to the engine, which keeps seeing the textures it asked for:
+//   - mip skipping (setting texture_skip_mips): a large mipmapped texture is created `skip` levels smaller; the
+//     guest's top levels go to a scratch buffer and are dropped. Halves texture resolution per level, quarters
+//     memory and bandwidth.
+//   - DXT decoding (setting decode_dxt, automatic when the GPU has no BC formats, e.g. Mali): DXT1/3/5 textures are
+//     created as A8R8G8B8 and decoded on unlock.
+struct TexAdapt {
+    D3DFORMAT format;   // what the guest asked for
+    UINT width, height;
+    UINT skip;          // guest level L is host level L - skip; levels below skip are dropped
+    bool decode;        // host texture is A8R8G8B8, guest writes DXT blocks
+};
+std::unordered_map<void*, TexAdapt> g_adapt;  // host texture -> adaptation, only for adapted textures
+int g_skip_mips = -1;                          // resolved on first texture
+UINT g_skip_min_size = 512;                    // only textures at least this large (larger side) lose levels
+bool g_decode_dxt = false;
+
+bool IsDxt(D3DFORMAT f) {
+    return f == D3DFMT_DXT1 || f == D3DFMT_DXT2 || f == D3DFMT_DXT3 || f == D3DFMT_DXT4 || f == D3DFMT_DXT5;
+}
+
+// Bytes per 4x4 block (DXT) or per pixel (plain formats the adaptation handles); 0 = not adaptable.
+UINT BlockBytes(D3DFORMAT f) {
+    switch (f) {
+        case D3DFMT_DXT1: return 8;
+        case D3DFMT_DXT2: case D3DFMT_DXT3: case D3DFMT_DXT4: case D3DFMT_DXT5: return 16;
+        case D3DFMT_A8R8G8B8: case D3DFMT_X8R8G8B8: return 4;
+        default: return 0;
+    }
+}
+
+// Pitch and row count of a guest level (or of `rect` within it) in the guest's format.
+void GuestLevelLayout(D3DFORMAT f, UINT w, UINT h, const RECT* rect, UINT* pitch, UINT* rows) {
+    UINT rh = rect ? UINT(rect->bottom - rect->top) : h;
+    if (IsDxt(f)) {
+        *pitch = ((w + 3) / 4) * BlockBytes(f);
+        *rows = (rh + 3) / 4;
+    } else {
+        *pitch = w * BlockBytes(f);
+        *rows = rh;
+    }
+}
+
+const TexAdapt* AdaptOf(void* host) {
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    auto it = g_adapt.find(host);
+    return it == g_adapt.end() ? nullptr : &it->second;
+}
+
+// Decides how a texture of the guest's description is created on the host.
+TexAdapt PlanTexture(UINT w, UINT h, UINT levels, DWORD usage, D3DFORMAT format) {
+    if (g_skip_mips < 0) {
+#ifdef __ANDROID__
+        g_skip_mips = SettingInt("texture_skip_mips", 1);
+#else
+        g_skip_mips = SettingInt("texture_skip_mips", 0);
+#endif
+        g_skip_min_size = UINT(SettingInt("texture_skip_min_size", 512));
+        Log("textures: skip %d mip level(s) of textures >= %u, decode DXT %s", g_skip_mips, g_skip_min_size,
+            g_decode_dxt ? "on" : "off");
+    }
+    TexAdapt a{format, w, h, 0, false};
+    bool plain = !(usage & (D3DUSAGE_RENDERTARGET | D3DUSAGE_DEPTHSTENCIL | D3DUSAGE_DYNAMIC));
+    if (plain && BlockBytes(format) && levels != 1 && (w > h ? w : h) >= g_skip_min_size) {
+        UINT skip = UINT(g_skip_mips);
+        // Keep at least one level and 4x4 blocks on the host.
+        while (skip && ((levels && skip >= levels) || (w >> skip) < 4 || (h >> skip) < 4)) --skip;
+        a.skip = skip;
+    }
+    a.decode = plain && g_decode_dxt && IsDxt(format);
+    // Statistics: GPU memory of the top level as the guest asked for it and as created.
+    static uint64_t count = 0, reduced = 0, decoded = 0, guest_bytes = 0, host_bytes = 0;
+    UINT bb = BlockBytes(format);
+    if (bb) {
+        uint64_t px = uint64_t(w) * h;
+        uint64_t g = IsDxt(format) ? px * bb / 16 : px * bb;
+        uint64_t hpx = px >> (2 * a.skip);
+        guest_bytes += g;
+        host_bytes += a.decode ? hpx * 4 : g >> (2 * a.skip);
+    }
+    ++count;
+    reduced += a.skip != 0;
+    decoded += a.decode;
+    if ((count & 1023) == 0) {
+        Log("textures: %llu created, %llu reduced, %llu decoded; top levels %llu MiB -> %llu MiB",
+            (unsigned long long)count, (unsigned long long)reduced, (unsigned long long)decoded,
+            (unsigned long long)(guest_bytes >> 20), (unsigned long long)(host_bytes >> 20));
+    }
+    return a;
+}
+
+// ---- DXT decoding into A8R8G8B8 (memory order B, G, R, A) ----
+void Rgb565(uint16_t c, uint8_t out[4]) {
+    out[2] = uint8_t(((c >> 11) & 31) * 255 / 31);
+    out[1] = uint8_t(((c >> 5) & 63) * 255 / 63);
+    out[0] = uint8_t((c & 31) * 255 / 31);
+    out[3] = 255;
+}
+
+// Colour block (DXT1 semantics when `dxt1`, else always four colours) -> 16 BGRA pixels.
+void DecodeColorBlock(const uint8_t* b, bool dxt1, uint8_t px[16][4]) {
+    uint16_t c0 = uint16_t(b[0] | b[1] << 8), c1 = uint16_t(b[2] | b[3] << 8);
+    uint8_t pal[4][4];
+    Rgb565(c0, pal[0]);
+    Rgb565(c1, pal[1]);
+    if (c0 > c1 || !dxt1) {
+        for (int k = 0; k < 4; ++k) {
+            pal[2][k] = uint8_t((2 * pal[0][k] + pal[1][k] + 1) / 3);
+            pal[3][k] = uint8_t((pal[0][k] + 2 * pal[1][k] + 1) / 3);
+        }
+    } else {
+        for (int k = 0; k < 4; ++k) pal[2][k] = uint8_t((pal[0][k] + pal[1][k]) / 2);
+        pal[3][0] = pal[3][1] = pal[3][2] = pal[3][3] = 0;  // transparent black
+    }
+    uint32_t idx = uint32_t(b[4] | b[5] << 8 | b[6] << 16 | uint32_t(b[7]) << 24);
+    for (int i = 0; i < 16; ++i) memcpy(px[i], pal[(idx >> (2 * i)) & 3], 4);
+}
+
+void DecodeBlock(D3DFORMAT f, const uint8_t* b, uint8_t px[16][4]) {
+    if (f == D3DFMT_DXT1) {
+        DecodeColorBlock(b, true, px);
+    } else if (f == D3DFMT_DXT2 || f == D3DFMT_DXT3) {
+        DecodeColorBlock(b + 8, false, px);
+        for (int i = 0; i < 16; ++i) px[i][3] = uint8_t(((b[i / 2] >> (4 * (i & 1))) & 15) * 17);
+    } else {  // DXT4/5: interpolated alpha
+        DecodeColorBlock(b + 8, false, px);
+        uint8_t a[8] = {b[0], b[1]};
+        if (a[0] > a[1]) {
+            for (int i = 1; i < 7; ++i) a[i + 1] = uint8_t(((7 - i) * a[0] + i * a[1] + 3) / 7);
+        } else {
+            for (int i = 1; i < 5; ++i) a[i + 1] = uint8_t(((5 - i) * a[0] + i * a[1] + 2) / 5);
+            a[6] = 0;
+            a[7] = 255;
+        }
+        uint64_t bits = 0;
+        for (int i = 0; i < 6; ++i) bits |= uint64_t(b[2 + i]) << (8 * i);
+        for (int i = 0; i < 16; ++i) px[i][3] = a[(bits >> (3 * i)) & 7];
+    }
+}
+
+// Guest DXT data (`rows` block rows of `pitch` bytes) -> host BGRA pixels of a w x h region.
+void DecodeDxt(D3DFORMAT f, const uint8_t* src, UINT pitch, UINT w, UINT h, uint8_t* dst, INT dst_pitch) {
+    UINT bw = (w + 3) / 4, bh = (h + 3) / 4, bytes = BlockBytes(f);
+    uint8_t px[16][4];
+    for (UINT by = 0; by < bh; ++by) {
+        for (UINT bx = 0; bx < bw; ++bx) {
+            DecodeBlock(f, src + by * pitch + bx * bytes, px);
+            for (UINT y = 0; y < 4 && by * 4 + y < h; ++y) {
+                for (UINT x = 0; x < 4 && bx * 4 + x < w; ++x) {
+                    memcpy(dst + INT(by * 4 + y) * dst_pitch + (bx * 4 + x) * 4, px[y * 4 + x], 4);
+                }
+            }
+        }
+    }
+}
+
+// ---- locks of adapted textures ----
+struct AdaptedLock {
+    uint32_t guest = 0, capacity = 0;  // guest buffer in the guest format
+    UINT pitch = 0;
+    D3DFORMAT format = D3DFMT_UNKNOWN;
+    UINT width = 0, height = 0;         // region being written
+    uint8_t* host = nullptr;            // locked host memory (decode target), null for dropped levels
+    INT host_pitch = 0;
+};
+std::map<std::pair<void*, uint32_t>, AdaptedLock> g_adapted_locks;
+
+// Locks guest level `level` of an adapted texture whose host level is locked through `lock_host`
+// (HRESULT(UINT host_level, D3DLOCKED_RECT*)); writes D3DLOCKED_RECT to the guest.
+template <typename LockHost>
+HRESULT AdaptedLockRect(void* tex, uint32_t sub, const TexAdapt& a, UINT level, const RECT* rect, DWORD flags,
+                        uint32_t out, LockHost lock_host) {
+    UINT w = a.width >> level ? a.width >> level : 1, h = a.height >> level ? a.height >> level : 1;
+    UINT pitch, rows;
+    GuestLevelLayout(a.format, w, h, rect, &pitch, &rows);
+    D3DLOCKED_RECT lr{};
+    bool dropped = level < a.skip;
+    if (!dropped) {
+        HRESULT hr = lock_host(level - a.skip, &lr);
+        if (FAILED(hr)) return hr;
+        if (!a.decode) {  // same format and size on the host: plain shadow
+            W32(out, uint32_t(lr.Pitch));
+            W32(out + 4, ShadowLock(tex, sub, lr.pBits, uint32_t(lr.Pitch) * rows, flags));
+            return D3D_OK;
+        }
+    }
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    AdaptedLock& l = g_adapted_locks[{tex, sub}];
+    uint32_t size = pitch * rows;
+    if (l.capacity < size) {
+        if (l.guest) HeapFree(l.guest);
+        l.guest = HeapAlloc(size);
+        l.capacity = size;
+    }
+    l.pitch = pitch;
+    l.format = a.format;
+    l.width = rect ? UINT(rect->right - rect->left) : w;
+    l.height = rect ? UINT(rect->bottom - rect->top) : h;
+    l.host = dropped ? nullptr : static_cast<uint8_t*>(lr.pBits);
+    l.host_pitch = lr.Pitch;
+    W32(out, pitch);
+    W32(out + 4, l.guest);
+    return D3D_OK;
+}
+
+// Returns true when the lock was a decoded or dropped one (the host level, if any, must still be unlocked).
+bool AdaptedUnlock(void* tex, uint32_t sub, bool* host_locked) {
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    auto it = g_adapted_locks.find({tex, sub});
+    if (it == g_adapted_locks.end() || !it->second.guest) return false;
+    AdaptedLock& l = it->second;
+    *host_locked = l.host != nullptr;
+    if (l.host) {
+        DecodeDxt(l.format, Ptr<uint8_t>(l.guest), l.pitch, l.width, l.height, l.host, l.host_pitch);
+        l.host = nullptr;
+    }
+    return true;
+}
+
+void ForgetResource(void* host) {
+    ForgetShadows(host);
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    g_adapt.erase(host);
+    for (auto it = g_adapted_locks.lower_bound({host, 0}); it != g_adapted_locks.end() && it->first.first == host;) {
+        if (it->second.guest) HeapFree(it->second.guest);
+        it = g_adapted_locks.erase(it);
+    }
+}
+
+// Guest view of a level description: guest size and format.
+void AdaptDesc(const TexAdapt& a, UINT level, D3DSURFACE_DESC* d) {
+    d->Format = a.format;
+    d->Width = a.width >> level ? a.width >> level : 1;
+    d->Height = a.height >> level ? a.height >> level : 1;
+}
+
 // ---- Direct3DCreate9 ----
 void x_Direct3DCreate9(Ctx* c) {
     IDirect3D9* d3d = Direct3DCreate9(Arg(c, 0));
     Log("Direct3DCreate9(%u) -> %p", Arg(c, 0), static_cast<void*>(d3d));
+    // GPUs without BC formats (Mali, PowerVR) get DXT textures decoded on the CPU; decode_dxt=1/0 forces it.
+    if (d3d) {
+        bool bc = SUCCEEDED(d3d->CheckDeviceFormat(0, D3DDEVTYPE_HAL, D3DFMT_X8R8G8B8, 0, D3DRTYPE_TEXTURE,
+                                                   D3DFMT_DXT5));
+        g_decode_dxt = SettingInt("decode_dxt", bc ? 0 : 1) != 0;
+        Log("GPU BC (DXT) textures: %s, decoding %s", bc ? "supported" : "not supported", g_decode_dxt ? "on" : "off");
+    }
     Return(c, Wrap(d3d), 1);
 }
 
@@ -399,10 +658,113 @@ M(IDirect3DSurface9, UnlockRect) {
 M(IDirect3DSurface9, GetDC) { Return(c, uint32_t(D3DERR_INVALIDCALL), 2); }
 M(IDirect3DSurface9, ReleaseDC) { Return(c, uint32_t(D3DERR_INVALIDCALL), 2); }
 
+M(IDirect3DDevice9, CreateTexture) {
+    // (this, Width, Height, Levels, Usage, Format, Pool, ppTexture, pSharedHandle)
+    UINT w = Arg(c, 1), h = Arg(c, 2), levels = Arg(c, 3);
+    DWORD usage = Arg(c, 4);
+    D3DFORMAT format = D3DFORMAT(Arg(c, 5));
+    TexAdapt a = PlanTexture(w, h, levels, usage, format);
+    IDirect3DTexture9* tex = nullptr;
+    HRESULT hr = Host<IDirect3DDevice9>(Arg(c, 0))->CreateTexture(
+        w >> a.skip, h >> a.skip, levels ? levels - a.skip : 0, usage, a.decode ? D3DFMT_A8R8G8B8 : format,
+        D3DPOOL(Arg(c, 6)), &tex, nullptr);
+    if (SUCCEEDED(hr) && (a.skip || a.decode)) {
+        std::lock_guard<std::recursive_mutex> lock(g_mutex);
+        g_adapt[tex] = a;
+    }
+    W32(Arg(c, 7), SUCCEEDED(hr) ? Wrap(tex) : 0);
+    Return(c, uint32_t(hr), 9);
+}
+M(IDirect3DDevice9, CreateCubeTexture) {
+    // (this, EdgeLength, Levels, Usage, Format, Pool, ppCubeTexture, pSharedHandle)
+    UINT edge = Arg(c, 1), levels = Arg(c, 2);
+    DWORD usage = Arg(c, 3);
+    D3DFORMAT format = D3DFORMAT(Arg(c, 4));
+    TexAdapt a = PlanTexture(edge, edge, levels, usage, format);
+    IDirect3DCubeTexture9* tex = nullptr;
+    HRESULT hr = Host<IDirect3DDevice9>(Arg(c, 0))->CreateCubeTexture(
+        edge >> a.skip, levels ? levels - a.skip : 0, usage, a.decode ? D3DFMT_A8R8G8B8 : format, D3DPOOL(Arg(c, 5)),
+        &tex, nullptr);
+    if (SUCCEEDED(hr) && (a.skip || a.decode)) {
+        std::lock_guard<std::recursive_mutex> lock(g_mutex);
+        g_adapt[tex] = a;
+    }
+    W32(Arg(c, 6), SUCCEEDED(hr) ? Wrap(tex) : 0);
+    Return(c, uint32_t(hr), 8);
+}
+M(IDirect3D9, CheckDeviceFormat) {
+    // (this, Adapter, DeviceType, AdapterFormat, Usage, RType, CheckFormat): DXT is always available when decoded.
+    D3DFORMAT check = D3DFORMAT(Arg(c, 6));
+    HRESULT hr = Host<IDirect3D9>(Arg(c, 0))->CheckDeviceFormat(Arg(c, 1), D3DDEVTYPE(Arg(c, 2)),
+                                                              D3DFORMAT(Arg(c, 3)), Arg(c, 4),
+                                                              D3DRESOURCETYPE(Arg(c, 5)), check);
+    if (FAILED(hr) && g_decode_dxt && IsDxt(check) && !(Arg(c, 4) & (D3DUSAGE_RENDERTARGET | D3DUSAGE_DEPTHSTENCIL))) {
+        hr = D3D_OK;
+    }
+    Return(c, uint32_t(hr), 7);
+}
+M(IDirect3DTexture9, GetLevelCount) {
+    auto* t = Host<IDirect3DTexture9>(Arg(c, 0));
+    const TexAdapt* a = AdaptOf(t);
+    Return(c, t->GetLevelCount() + (a ? a->skip : 0), 1);
+}
+M(IDirect3DCubeTexture9, GetLevelCount) {
+    auto* t = Host<IDirect3DCubeTexture9>(Arg(c, 0));
+    const TexAdapt* a = AdaptOf(t);
+    Return(c, t->GetLevelCount() + (a ? a->skip : 0), 1);
+}
+M(IDirect3DTexture9, GetLevelDesc) {
+    auto* t = Host<IDirect3DTexture9>(Arg(c, 0));
+    UINT level = Arg(c, 1);
+    const TexAdapt* a = AdaptOf(t);
+    D3DSURFACE_DESC* d = Ptr<D3DSURFACE_DESC>(Arg(c, 2));
+    HRESULT hr = t->GetLevelDesc(a && level >= a->skip ? level - a->skip : a ? 0 : level, d);
+    if (SUCCEEDED(hr) && a) AdaptDesc(*a, level, d);
+    Return(c, uint32_t(hr), 3);
+}
+M(IDirect3DCubeTexture9, GetLevelDesc) {
+    auto* t = Host<IDirect3DCubeTexture9>(Arg(c, 0));
+    UINT level = Arg(c, 1);
+    const TexAdapt* a = AdaptOf(t);
+    D3DSURFACE_DESC* d = Ptr<D3DSURFACE_DESC>(Arg(c, 2));
+    HRESULT hr = t->GetLevelDesc(a && level >= a->skip ? level - a->skip : a ? 0 : level, d);
+    if (SUCCEEDED(hr) && a) AdaptDesc(*a, level, d);
+    Return(c, uint32_t(hr), 3);
+}
+// Surfaces of adapted textures: the nearest host level (dropped levels map to the top host level).
+M(IDirect3DTexture9, GetSurfaceLevel) {
+    auto* t = Host<IDirect3DTexture9>(Arg(c, 0));
+    const TexAdapt* a = AdaptOf(t);
+    UINT level = Arg(c, 1);
+    IDirect3DSurface9* surf = nullptr;
+    HRESULT hr = t->GetSurfaceLevel(a ? (level >= a->skip ? level - a->skip : 0) : level, &surf);
+    W32(Arg(c, 2), SUCCEEDED(hr) ? Wrap(surf) : 0);
+    Return(c, uint32_t(hr), 3);
+}
+M(IDirect3DCubeTexture9, GetCubeMapSurface) {
+    auto* t = Host<IDirect3DCubeTexture9>(Arg(c, 0));
+    const TexAdapt* a = AdaptOf(t);
+    UINT level = Arg(c, 2);
+    IDirect3DSurface9* surf = nullptr;
+    HRESULT hr = t->GetCubeMapSurface(D3DCUBEMAP_FACES(Arg(c, 1)), a ? (level >= a->skip ? level - a->skip : 0) : level,
+                                      &surf);
+    W32(Arg(c, 3), SUCCEEDED(hr) ? Wrap(surf) : 0);
+    Return(c, uint32_t(hr), 4);
+}
 M(IDirect3DTexture9, LockRect) {
+    // (this, Level, pLockedRect, pRect, Flags)
     auto* t = Host<IDirect3DTexture9>(Arg(c, 0));
     uint32_t level = Arg(c, 1);
     const RECT* rect = Ptr<RECT>(Arg(c, 3));
+    if (const TexAdapt* a = AdaptOf(t)) {
+        TexAdapt copy = *a;
+        HRESULT hr = AdaptedLockRect(t, level, copy, level, rect, Arg(c, 4), Arg(c, 2),
+                                     [&](UINT host_level, D3DLOCKED_RECT* lr) {
+                                         return t->LockRect(host_level, lr, rect, Arg(c, 4));
+                                     });
+        Return(c, uint32_t(hr), 5);
+        return;
+    }
     D3DLOCKED_RECT lr;
     HRESULT hr = t->LockRect(level, &lr, rect, Arg(c, 4));
     D3DSURFACE_DESC desc;
@@ -411,13 +773,30 @@ M(IDirect3DTexture9, LockRect) {
 }
 M(IDirect3DTexture9, UnlockRect) {
     auto* t = Host<IDirect3DTexture9>(Arg(c, 0));
-    ShadowUnlock(t, Arg(c, 1));
-    Return(c, uint32_t(t->UnlockRect(Arg(c, 1))), 2);
+    uint32_t level = Arg(c, 1);
+    const TexAdapt* a = AdaptOf(t);
+    bool host_locked = true;
+    if (a && AdaptedUnlock(t, level, &host_locked)) {
+        Return(c, host_locked ? uint32_t(t->UnlockRect(level - a->skip)) : 0u, 2);
+        return;
+    }
+    ShadowUnlock(t, level);
+    Return(c, uint32_t(t->UnlockRect(a ? level - a->skip : level)), 2);
 }
 M(IDirect3DCubeTexture9, LockRect) {
+    // (this, FaceType, Level, pLockedRect, pRect, Flags)
     auto* t = Host<IDirect3DCubeTexture9>(Arg(c, 0));
     uint32_t face = Arg(c, 1), level = Arg(c, 2);
     const RECT* rect = Ptr<RECT>(Arg(c, 4));
+    if (const TexAdapt* a = AdaptOf(t)) {
+        TexAdapt copy = *a;
+        HRESULT hr = AdaptedLockRect(t, face * 64 + level, copy, level, rect, Arg(c, 5), Arg(c, 3),
+                                     [&](UINT host_level, D3DLOCKED_RECT* lr) {
+                                         return t->LockRect(D3DCUBEMAP_FACES(face), host_level, lr, rect, Arg(c, 5));
+                                     });
+        Return(c, uint32_t(hr), 6);
+        return;
+    }
     D3DLOCKED_RECT lr;
     HRESULT hr = t->LockRect(D3DCUBEMAP_FACES(face), level, &lr, rect, Arg(c, 5));
     D3DSURFACE_DESC desc;
@@ -426,8 +805,15 @@ M(IDirect3DCubeTexture9, LockRect) {
 }
 M(IDirect3DCubeTexture9, UnlockRect) {
     auto* t = Host<IDirect3DCubeTexture9>(Arg(c, 0));
-    ShadowUnlock(t, Arg(c, 1) * 64 + Arg(c, 2));
-    Return(c, uint32_t(t->UnlockRect(D3DCUBEMAP_FACES(Arg(c, 1)), Arg(c, 2))), 3);
+    uint32_t face = Arg(c, 1), level = Arg(c, 2);
+    const TexAdapt* a = AdaptOf(t);
+    bool host_locked = true;
+    if (a && AdaptedUnlock(t, face * 64 + level, &host_locked)) {
+        Return(c, host_locked ? uint32_t(t->UnlockRect(D3DCUBEMAP_FACES(face), level - a->skip)) : 0u, 3);
+        return;
+    }
+    ShadowUnlock(t, face * 64 + level);
+    Return(c, uint32_t(t->UnlockRect(D3DCUBEMAP_FACES(face), a ? level - a->skip : level)), 3);
 }
 
 // D3DLOCKED_BOX in guest memory: {INT RowPitch; INT SlicePitch; void* pBits} (12 bytes).

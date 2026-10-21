@@ -31,6 +31,11 @@ MANUAL = {
     "IDirect3DVolume9::LockBox", "IDirect3DVolume9::UnlockBox",
     "IDirect3DVertexBuffer9::Lock", "IDirect3DVertexBuffer9::Unlock",
     "IDirect3DIndexBuffer9::Lock", "IDirect3DIndexBuffer9::Unlock",
+    # texture adaptation for mobile GPUs (mip skipping, DXT decoding)
+    "IDirect3D9::CheckDeviceFormat", "IDirect3DDevice9::CreateTexture", "IDirect3DDevice9::CreateCubeTexture",
+    "IDirect3DTexture9::GetLevelDesc", "IDirect3DTexture9::GetLevelCount", "IDirect3DTexture9::GetSurfaceLevel",
+    "IDirect3DCubeTexture9::GetLevelDesc", "IDirect3DCubeTexture9::GetLevelCount",
+    "IDirect3DCubeTexture9::GetCubeMapSurface",
 }
 
 FLOAT_TYPES = {"float", "FLOAT"}

@@ -16,7 +16,7 @@ namespace {
 constexpr uint32_t kMainWindow = 0x00010010u;
 constexpr uint32_t kDesktopWindow = 0x00010004u;
 uint32_t g_next_window = 0x00010020u;
-int g_width = 1280, g_height = 720;
+int g_width = 1280, g_height = 720;  // client size = render resolution (InitClientSize)
 
 std::mutex g_mutex;
 std::map<std::pair<uint32_t, int32_t>, uint32_t> g_window_longs;
@@ -131,5 +131,29 @@ ImportRegistrar g_user32(kUser32);
 }  // namespace
 
 uint32_t HostWindow() { return kMainWindow; }
+
+// The engine renders at the size of the window's client area. Setting render_height (default 720 on Android, 0 = the
+// real window size elsewhere) makes it render smaller, keeping the window's aspect ratio; DXVK scales the frame to
+// the window when presenting.
+void InitClientSize(int window_w, int window_h) {
+#ifdef __ANDROID__
+    int rh = SettingInt("render_height", 720);
+#else
+    int rh = SettingInt("render_height", 0);
+#endif
+    if (rh > 0 && window_h > 0) {
+        g_height = rh;
+        g_width = (rh * window_w / window_h + 4) & ~7;
+    } else {
+        g_width = window_w;
+        g_height = window_h;
+    }
+    Log("render size %dx%d (window %dx%d)", g_width, g_height, window_w, window_h);
+}
+
+void ClientSize(int* w, int* h) {
+    *w = g_width;
+    *h = g_height;
+}
 
 }  // namespace native

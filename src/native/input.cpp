@@ -11,6 +11,8 @@
 
 namespace native {
 
+void ClientSize(int* w, int* h);  // user32.cpp
+
 namespace {
 
 constexpr uint32_t kWmKeyDown = 0x100, kWmKeyUp = 0x101;
@@ -78,7 +80,6 @@ const KeyMap* FindKey(SDL_Scancode s) {
 }
 
 uint32_t g_keyboard_service = 0, g_mouse_service = 0;
-int g_client_w = 1280, g_client_h = 720;  // what user32 GetClientRect reports
 
 uint32_t ButtonState() {
     uint32_t b = SDL_GetMouseState(nullptr, nullptr);
@@ -94,10 +95,11 @@ uint32_t ButtonState() {
 
 // Window pixels -> the client coordinates the engine believes in.
 uint32_t PackPoint(SDL_Window* w, int x, int y) {
-    int ww = 1, wh = 1;
+    int ww = 1, wh = 1, cw, ch;
     SDL_GetWindowSize(w, &ww, &wh);
-    uint32_t cx = uint32_t(x * g_client_w / (ww ? ww : 1)) & 0xffff;
-    uint32_t cy = uint32_t(y * g_client_h / (wh ? wh : 1)) & 0xffff;
+    ClientSize(&cw, &ch);
+    uint32_t cx = uint32_t(x * cw / (ww ? ww : 1)) & 0xffff;
+    uint32_t cy = uint32_t(y * ch / (wh ? wh : 1)) & 0xffff;
     return cy << 16 | cx;
 }
 
@@ -147,7 +149,9 @@ void InitInput(uint32_t keyboard_service, uint32_t mouse_service) {
     g_mouse_service = mouse_service;
     // Windows sends WM_MOUSEMOVE as soon as the window is under the cursor; the engine treats the mouse as a
     // connected controller only after its first message, and the front end expects it to be there.
-    Mouse(kWmMouseMove, 0, uint32_t(g_client_h / 2) << 16 | uint32_t(g_client_w / 2));
+    int cw, ch;
+    ClientSize(&cw, &ch);
+    Mouse(kWmMouseMove, 0, uint32_t(ch / 2) << 16 | uint32_t(cw / 2));
 }
 
 void ForwardInput(const SDL_Event& e) {

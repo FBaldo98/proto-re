@@ -62,6 +62,7 @@ void Fatal(const char* fmt, ...) {
 }
 
 uint32_t HostWindow();  // user32.cpp
+void InitClientSize(int window_w, int window_h);
 void InitD3D9Bridge();  // d3d9.cpp
 void InitInput(uint32_t keyboard_service, uint32_t mouse_service);  // input.cpp
 void ForwardInput(const SDL_Event& e);
@@ -110,8 +111,22 @@ int main(int argc, char** argv) {
     // The game window: DXVK's native WSI takes the SDL window as HWND.
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_GAMECONTROLLER) != 0) Fatal("SDL_Init: %s", SDL_GetError());
     g_sdl_window = SDL_CreateWindow("Prototype", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1280, 720,
-                                    SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
+                                    SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE
+#ifdef __ANDROID__
+                                        | SDL_WINDOW_FULLSCREEN
+#endif
+    );
     if (!g_sdl_window) Fatal("SDL_CreateWindow: %s", SDL_GetError());
+    int window_w, window_h;
+    SDL_GetWindowSize(g_sdl_window, &window_w, &window_h);
+#ifdef __ANDROID__
+    SDL_DisplayMode mode;  // the window becomes the whole screen; its size is not known yet
+    if (SDL_GetDesktopDisplayMode(0, &mode) == 0) {
+        window_w = mode.w > mode.h ? mode.w : mode.h;  // landscape
+        window_h = mode.w > mode.h ? mode.h : mode.w;
+    }
+#endif
+    InitClientSize(window_w, window_h);
 
     std::string dll = std::string(g_game_dir) + "/prototypeenginef.dll";
     if (!LoadImage(dll.c_str(), &g_engine)) return 1;

@@ -10,7 +10,8 @@ static void h_IDirect3D9_GetAdapterModeCount(Ctx* c) { auto r = Host<IDirect3D9>
 static void h_IDirect3D9_EnumAdapterModes(Ctx* c) { auto r = Host<IDirect3D9>(Arg(c, 0))->EnumAdapterModes((UINT)Arg(c, 1), (D3DFORMAT)Arg(c, 2), (UINT)Arg(c, 3), reinterpret_cast<D3DDISPLAYMODE*>(Ptr<void>(Arg(c, 4))));  Return(c, (uint32_t)r, 5); }
 static void h_IDirect3D9_GetAdapterDisplayMode(Ctx* c) { auto r = Host<IDirect3D9>(Arg(c, 0))->GetAdapterDisplayMode((UINT)Arg(c, 1), reinterpret_cast<D3DDISPLAYMODE*>(Ptr<void>(Arg(c, 2))));  Return(c, (uint32_t)r, 3); }
 static void h_IDirect3D9_CheckDeviceType(Ctx* c) { auto r = Host<IDirect3D9>(Arg(c, 0))->CheckDeviceType((UINT)Arg(c, 1), (D3DDEVTYPE)Arg(c, 2), (D3DFORMAT)Arg(c, 3), (D3DFORMAT)Arg(c, 4), (WINBOOL)Arg(c, 5));  Return(c, (uint32_t)r, 6); }
-static void h_IDirect3D9_CheckDeviceFormat(Ctx* c) { auto r = Host<IDirect3D9>(Arg(c, 0))->CheckDeviceFormat((UINT)Arg(c, 1), (D3DDEVTYPE)Arg(c, 2), (D3DFORMAT)Arg(c, 3), (DWORD)Arg(c, 4), (D3DRESOURCETYPE)Arg(c, 5), (D3DFORMAT)Arg(c, 6));  Return(c, (uint32_t)r, 7); }
+void Manual_IDirect3D9_CheckDeviceFormat(Ctx* c);
+static void h_IDirect3D9_CheckDeviceFormat(Ctx* c) { Manual_IDirect3D9_CheckDeviceFormat(c); }
 static void h_IDirect3D9_CheckDeviceMultiSampleType(Ctx* c) { auto r = Host<IDirect3D9>(Arg(c, 0))->CheckDeviceMultiSampleType((UINT)Arg(c, 1), (D3DDEVTYPE)Arg(c, 2), (D3DFORMAT)Arg(c, 3), (WINBOOL)Arg(c, 4), (D3DMULTISAMPLE_TYPE)Arg(c, 5), reinterpret_cast<DWORD*>(Ptr<void>(Arg(c, 6))));  Return(c, (uint32_t)r, 7); }
 static void h_IDirect3D9_CheckDepthStencilMatch(Ctx* c) { auto r = Host<IDirect3D9>(Arg(c, 0))->CheckDepthStencilMatch((UINT)Arg(c, 1), (D3DDEVTYPE)Arg(c, 2), (D3DFORMAT)Arg(c, 3), (D3DFORMAT)Arg(c, 4), (D3DFORMAT)Arg(c, 5));  Return(c, (uint32_t)r, 6); }
 static void h_IDirect3D9_CheckDeviceFormatConversion(Ctx* c) { auto r = Host<IDirect3D9>(Arg(c, 0))->CheckDeviceFormatConversion((UINT)Arg(c, 1), (D3DDEVTYPE)Arg(c, 2), (D3DFORMAT)Arg(c, 3), (D3DFORMAT)Arg(c, 4));  Return(c, (uint32_t)r, 5); }
@@ -67,9 +68,11 @@ static void h_IDirect3DDevice9_GetRasterStatus(Ctx* c) { auto r = Host<IDirect3D
 static void h_IDirect3DDevice9_SetDialogBoxMode(Ctx* c) { auto r = Host<IDirect3DDevice9>(Arg(c, 0))->SetDialogBoxMode((WINBOOL)Arg(c, 1));  Return(c, (uint32_t)r, 2); }
 static void h_IDirect3DDevice9_SetGammaRamp(Ctx* c) { Host<IDirect3DDevice9>(Arg(c, 0))->SetGammaRamp((UINT)Arg(c, 1), (DWORD)Arg(c, 2), reinterpret_cast<const D3DGAMMARAMP *>(Ptr<void>(Arg(c, 3))));  Return(c, 0, 4); }
 static void h_IDirect3DDevice9_GetGammaRamp(Ctx* c) { Host<IDirect3DDevice9>(Arg(c, 0))->GetGammaRamp((UINT)Arg(c, 1), reinterpret_cast<D3DGAMMARAMP*>(Ptr<void>(Arg(c, 2))));  Return(c, 0, 3); }
-static void h_IDirect3DDevice9_CreateTexture(Ctx* c) { IDirect3DTexture9* out7 = nullptr; auto r = Host<IDirect3DDevice9>(Arg(c, 0))->CreateTexture((UINT)Arg(c, 1), (UINT)Arg(c, 2), (UINT)Arg(c, 3), (DWORD)Arg(c, 4), (D3DFORMAT)Arg(c, 5), (D3DPOOL)Arg(c, 6), Arg(c, 7) ? &out7 : nullptr, nullptr); if (Arg(c, 7)) W32(Arg(c, 7), Wrap(out7)); Return(c, (uint32_t)r, 9); }
+void Manual_IDirect3DDevice9_CreateTexture(Ctx* c);
+static void h_IDirect3DDevice9_CreateTexture(Ctx* c) { Manual_IDirect3DDevice9_CreateTexture(c); }
 static void h_IDirect3DDevice9_CreateVolumeTexture(Ctx* c) { IDirect3DVolumeTexture9* out8 = nullptr; auto r = Host<IDirect3DDevice9>(Arg(c, 0))->CreateVolumeTexture((UINT)Arg(c, 1), (UINT)Arg(c, 2), (UINT)Arg(c, 3), (UINT)Arg(c, 4), (DWORD)Arg(c, 5), (D3DFORMAT)Arg(c, 6), (D3DPOOL)Arg(c, 7), Arg(c, 8) ? &out8 : nullptr, nullptr); if (Arg(c, 8)) W32(Arg(c, 8), Wrap(out8)); Return(c, (uint32_t)r, 10); }
-static void h_IDirect3DDevice9_CreateCubeTexture(Ctx* c) { IDirect3DCubeTexture9* out6 = nullptr; auto r = Host<IDirect3DDevice9>(Arg(c, 0))->CreateCubeTexture((UINT)Arg(c, 1), (UINT)Arg(c, 2), (DWORD)Arg(c, 3), (D3DFORMAT)Arg(c, 4), (D3DPOOL)Arg(c, 5), Arg(c, 6) ? &out6 : nullptr, nullptr); if (Arg(c, 6)) W32(Arg(c, 6), Wrap(out6)); Return(c, (uint32_t)r, 8); }
+void Manual_IDirect3DDevice9_CreateCubeTexture(Ctx* c);
+static void h_IDirect3DDevice9_CreateCubeTexture(Ctx* c) { Manual_IDirect3DDevice9_CreateCubeTexture(c); }
 static void h_IDirect3DDevice9_CreateVertexBuffer(Ctx* c) { IDirect3DVertexBuffer9* out5 = nullptr; auto r = Host<IDirect3DDevice9>(Arg(c, 0))->CreateVertexBuffer((UINT)Arg(c, 1), (DWORD)Arg(c, 2), (DWORD)Arg(c, 3), (D3DPOOL)Arg(c, 4), Arg(c, 5) ? &out5 : nullptr, nullptr); if (Arg(c, 5)) W32(Arg(c, 5), Wrap(out5)); Return(c, (uint32_t)r, 7); }
 static void h_IDirect3DDevice9_CreateIndexBuffer(Ctx* c) { IDirect3DIndexBuffer9* out5 = nullptr; auto r = Host<IDirect3DDevice9>(Arg(c, 0))->CreateIndexBuffer((UINT)Arg(c, 1), (DWORD)Arg(c, 2), (D3DFORMAT)Arg(c, 3), (D3DPOOL)Arg(c, 4), Arg(c, 5) ? &out5 : nullptr, nullptr); if (Arg(c, 5)) W32(Arg(c, 5), Wrap(out5)); Return(c, (uint32_t)r, 7); }
 static void h_IDirect3DDevice9_CreateRenderTarget(Ctx* c) { IDirect3DSurface9* out7 = nullptr; auto r = Host<IDirect3DDevice9>(Arg(c, 0))->CreateRenderTarget((UINT)Arg(c, 1), (UINT)Arg(c, 2), (D3DFORMAT)Arg(c, 3), (D3DMULTISAMPLE_TYPE)Arg(c, 4), (DWORD)Arg(c, 5), (WINBOOL)Arg(c, 6), Arg(c, 7) ? &out7 : nullptr, nullptr); if (Arg(c, 7)) W32(Arg(c, 7), Wrap(out7)); Return(c, (uint32_t)r, 9); }
@@ -521,12 +524,15 @@ static void h_IDirect3DTexture9_PreLoad(Ctx* c) { Host<IDirect3DTexture9>(Arg(c,
 static void h_IDirect3DTexture9_GetType(Ctx* c) { auto r = Host<IDirect3DTexture9>(Arg(c, 0))->GetType();  Return(c, (uint32_t)r, 1); }
 static void h_IDirect3DTexture9_SetLOD(Ctx* c) { auto r = Host<IDirect3DTexture9>(Arg(c, 0))->SetLOD((DWORD)Arg(c, 1));  Return(c, (uint32_t)r, 2); }
 static void h_IDirect3DTexture9_GetLOD(Ctx* c) { auto r = Host<IDirect3DTexture9>(Arg(c, 0))->GetLOD();  Return(c, (uint32_t)r, 1); }
-static void h_IDirect3DTexture9_GetLevelCount(Ctx* c) { auto r = Host<IDirect3DTexture9>(Arg(c, 0))->GetLevelCount();  Return(c, (uint32_t)r, 1); }
+void Manual_IDirect3DTexture9_GetLevelCount(Ctx* c);
+static void h_IDirect3DTexture9_GetLevelCount(Ctx* c) { Manual_IDirect3DTexture9_GetLevelCount(c); }
 static void h_IDirect3DTexture9_SetAutoGenFilterType(Ctx* c) { auto r = Host<IDirect3DTexture9>(Arg(c, 0))->SetAutoGenFilterType((D3DTEXTUREFILTERTYPE)Arg(c, 1));  Return(c, (uint32_t)r, 2); }
 static void h_IDirect3DTexture9_GetAutoGenFilterType(Ctx* c) { auto r = Host<IDirect3DTexture9>(Arg(c, 0))->GetAutoGenFilterType();  Return(c, (uint32_t)r, 1); }
 static void h_IDirect3DTexture9_GenerateMipSubLevels(Ctx* c) { Host<IDirect3DTexture9>(Arg(c, 0))->GenerateMipSubLevels();  Return(c, 0, 1); }
-static void h_IDirect3DTexture9_GetLevelDesc(Ctx* c) { auto r = Host<IDirect3DTexture9>(Arg(c, 0))->GetLevelDesc((UINT)Arg(c, 1), reinterpret_cast<D3DSURFACE_DESC*>(Ptr<void>(Arg(c, 2))));  Return(c, (uint32_t)r, 3); }
-static void h_IDirect3DTexture9_GetSurfaceLevel(Ctx* c) { IDirect3DSurface9* out2 = nullptr; auto r = Host<IDirect3DTexture9>(Arg(c, 0))->GetSurfaceLevel((UINT)Arg(c, 1), Arg(c, 2) ? &out2 : nullptr); if (Arg(c, 2)) W32(Arg(c, 2), Wrap(out2)); Return(c, (uint32_t)r, 3); }
+void Manual_IDirect3DTexture9_GetLevelDesc(Ctx* c);
+static void h_IDirect3DTexture9_GetLevelDesc(Ctx* c) { Manual_IDirect3DTexture9_GetLevelDesc(c); }
+void Manual_IDirect3DTexture9_GetSurfaceLevel(Ctx* c);
+static void h_IDirect3DTexture9_GetSurfaceLevel(Ctx* c) { Manual_IDirect3DTexture9_GetSurfaceLevel(c); }
 void Manual_IDirect3DTexture9_LockRect(Ctx* c);
 static void h_IDirect3DTexture9_LockRect(Ctx* c) { Manual_IDirect3DTexture9_LockRect(c); }
 void Manual_IDirect3DTexture9_UnlockRect(Ctx* c);
@@ -570,12 +576,15 @@ static void h_IDirect3DCubeTexture9_PreLoad(Ctx* c) { Host<IDirect3DCubeTexture9
 static void h_IDirect3DCubeTexture9_GetType(Ctx* c) { auto r = Host<IDirect3DCubeTexture9>(Arg(c, 0))->GetType();  Return(c, (uint32_t)r, 1); }
 static void h_IDirect3DCubeTexture9_SetLOD(Ctx* c) { auto r = Host<IDirect3DCubeTexture9>(Arg(c, 0))->SetLOD((DWORD)Arg(c, 1));  Return(c, (uint32_t)r, 2); }
 static void h_IDirect3DCubeTexture9_GetLOD(Ctx* c) { auto r = Host<IDirect3DCubeTexture9>(Arg(c, 0))->GetLOD();  Return(c, (uint32_t)r, 1); }
-static void h_IDirect3DCubeTexture9_GetLevelCount(Ctx* c) { auto r = Host<IDirect3DCubeTexture9>(Arg(c, 0))->GetLevelCount();  Return(c, (uint32_t)r, 1); }
+void Manual_IDirect3DCubeTexture9_GetLevelCount(Ctx* c);
+static void h_IDirect3DCubeTexture9_GetLevelCount(Ctx* c) { Manual_IDirect3DCubeTexture9_GetLevelCount(c); }
 static void h_IDirect3DCubeTexture9_SetAutoGenFilterType(Ctx* c) { auto r = Host<IDirect3DCubeTexture9>(Arg(c, 0))->SetAutoGenFilterType((D3DTEXTUREFILTERTYPE)Arg(c, 1));  Return(c, (uint32_t)r, 2); }
 static void h_IDirect3DCubeTexture9_GetAutoGenFilterType(Ctx* c) { auto r = Host<IDirect3DCubeTexture9>(Arg(c, 0))->GetAutoGenFilterType();  Return(c, (uint32_t)r, 1); }
 static void h_IDirect3DCubeTexture9_GenerateMipSubLevels(Ctx* c) { Host<IDirect3DCubeTexture9>(Arg(c, 0))->GenerateMipSubLevels();  Return(c, 0, 1); }
-static void h_IDirect3DCubeTexture9_GetLevelDesc(Ctx* c) { auto r = Host<IDirect3DCubeTexture9>(Arg(c, 0))->GetLevelDesc((UINT)Arg(c, 1), reinterpret_cast<D3DSURFACE_DESC*>(Ptr<void>(Arg(c, 2))));  Return(c, (uint32_t)r, 3); }
-static void h_IDirect3DCubeTexture9_GetCubeMapSurface(Ctx* c) { IDirect3DSurface9* out3 = nullptr; auto r = Host<IDirect3DCubeTexture9>(Arg(c, 0))->GetCubeMapSurface((D3DCUBEMAP_FACES)Arg(c, 1), (UINT)Arg(c, 2), Arg(c, 3) ? &out3 : nullptr); if (Arg(c, 3)) W32(Arg(c, 3), Wrap(out3)); Return(c, (uint32_t)r, 4); }
+void Manual_IDirect3DCubeTexture9_GetLevelDesc(Ctx* c);
+static void h_IDirect3DCubeTexture9_GetLevelDesc(Ctx* c) { Manual_IDirect3DCubeTexture9_GetLevelDesc(c); }
+void Manual_IDirect3DCubeTexture9_GetCubeMapSurface(Ctx* c);
+static void h_IDirect3DCubeTexture9_GetCubeMapSurface(Ctx* c) { Manual_IDirect3DCubeTexture9_GetCubeMapSurface(c); }
 void Manual_IDirect3DCubeTexture9_LockRect(Ctx* c);
 static void h_IDirect3DCubeTexture9_LockRect(Ctx* c) { Manual_IDirect3DCubeTexture9_LockRect(c); }
 void Manual_IDirect3DCubeTexture9_UnlockRect(Ctx* c);

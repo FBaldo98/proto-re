@@ -7,8 +7,10 @@ PLATFORM ?= linux
 RECOMP_DIR ?= ../../build/recomp/all
 DXVK ?= $(HOME)/proto-re-data/deps/dxvk
 COMMON_FLAGS := -DRECOMP_FLAT_MEMORY -fsigned-char -I../recomp
-# Generated code: -O1 keeps the large parts quick to build; flat memory turns G() into plain pointers.
-RECOMP_CFLAGS = -std=c11 -O1 -g0 -fno-strict-aliasing -fwrapv -fno-delete-null-pointer-checks -w $(COMMON_FLAGS) \
+# Generated code: flat memory turns G() into plain pointers. -O1 on the desktop keeps rebuilds quick; Android gets
+# -O2 (clang: barely slower to build).
+RECOMP_OPT ?= -O1
+RECOMP_CFLAGS = -std=c11 $(RECOMP_OPT) -g0 -fno-strict-aliasing -fwrapv -fno-delete-null-pointer-checks -w $(COMMON_FLAGS) \
                 $(TARGET_FLAGS)
 CXXFLAGS = -std=c++17 -O2 -g -Wall -Wextra -Wno-unused-parameter $(COMMON_FLAGS) $(TARGET_FLAGS) \
            -I$(DXVK)/include/native/directx -I$(DXVK)/include/native/windows -I$(DXVK)/include/native/wsi \
@@ -23,7 +25,8 @@ TOOLCHAIN := $(NDK)/toolchains/llvm/prebuilt/linux-x86_64/bin
 CXX := $(TOOLCHAIN)/$(TRIPLE)-clang++
 CC := $(TOOLCHAIN)/$(TRIPLE)-clang
 OUT ?= ../../build/android/$(ABI)
-TARGET_FLAGS := -fPIC
+TARGET_FLAGS := -fPIC $(if $(filter arm64-v8a,$(ABI)),-moutline-atomics)
+RECOMP_OPT := -O2
 DEP_INCLUDES := -I$(DEPS)/include
 LDFLAGS := -shared -static-libstdc++ -Wl,--no-undefined -L$(DEPS)/lib -ldxvk_d3d9 -lFAudio -lSDL2 -llog -landroid
 BINARY := libmain.so
@@ -43,7 +46,7 @@ BINARY := proto-native
 endif
 
 SRCS := main.cpp memory.cpp loader.cpp imports.cpp runtime.cpp thread.cpp kernel32.cpp msvcr80.cpp user32.cpp \
-        advapi32.cpp misc.cpp d3d9.cpp input.cpp xaudio2.cpp bink.cpp dinput.cpp gamepad.cpp
+        advapi32.cpp misc.cpp d3d9.cpp input.cpp xaudio2.cpp bink.cpp dinput.cpp gamepad.cpp config.cpp
 GEN := $(wildcard $(RECOMP_DIR)/*.c)
 OBJS = $(SRCS:%.cpp=$(OUT)/%.o) $(GEN:$(RECOMP_DIR)/%.c=$(OUT)/gen/%.o)
 
