@@ -5,6 +5,7 @@
 //         window message, then EngineService(quit_requested, inactive) -> bool (false: leave the loop),
 //         EngineWindowFocus(focused)
 //   EngineTerminate()
+#include <SDL2/SDL.h>
 #include <unistd.h>
 
 #include <cstdarg>
@@ -52,6 +53,8 @@ void Fatal(const char* fmt, ...) {
 }
 
 uint32_t HostWindow();  // user32.cpp
+void InitD3D9Bridge();  // d3d9.cpp
+extern SDL_Window* g_sdl_window;
 
 }  // namespace native
 
@@ -66,6 +69,14 @@ int main(int argc, char** argv) {
     g_log = fopen("proto-native.log", "w");
     InitGuestMemory();
     AttachThread(8u << 20);
+    InitD3D9Bridge();
+    setenv("DXVK_WSI_DRIVER", "SDL2", 0);  // DXVK native: the HWNDs we pass are SDL windows
+
+    // The game window: DXVK's native WSI takes the SDL window as HWND.
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_GAMECONTROLLER) != 0) Fatal("SDL_Init: %s", SDL_GetError());
+    g_sdl_window = SDL_CreateWindow("Prototype", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1280, 720,
+                                    SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
+    if (!g_sdl_window) Fatal("SDL_CreateWindow: %s", SDL_GetError());
 
     std::string dll = std::string(g_game_dir) + "/prototypeenginef.dll";
     if (!LoadImage(dll.c_str(), &g_engine)) return 1;
@@ -95,7 +106,12 @@ int main(int argc, char** argv) {
 
     for (uint64_t frame = 0;; ++frame) {
         if ((frame & (frame - 1)) == 0) Log("frame %llu", (unsigned long long)frame);
-        bool keep = (GuestCall(service, {0, 0}) & 0xff) != 0;
+        bool quit = false;
+        SDL_Event e;
+        while (SDL_PollEvent(&e)) {
+            if (e.type == SDL_QUIT) quit = true;
+        }
+        bool keep = (GuestCall(service, {quit ? 1u : 0u, 0}) & 0xff) != 0;
         GuestCall(focus, {1});
         if (!keep) break;
     }

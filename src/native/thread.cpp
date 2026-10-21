@@ -1,7 +1,6 @@
 // Guest threads and fibers. Each guest thread runs on a host thread with its own TEB and guest stack in guest
-// memory. Fibers get their own guest stack and host stack; SwitchToFiber swaps host contexts (ucontext for now;
-// Android's bionic has no swapcontext, an arm64 context switch replaces it there).
-#include <ucontext.h>
+// memory. Fibers get their own guest stack and host stack; SwitchToFiber swaps host stacks with a small context
+// switch (x86-64 and arm64; bionic has no swapcontext).
 
 #include <atomic>
 #include <cstdlib>
@@ -56,6 +55,67 @@ GuestThread* CurrentThread() {
 
 uint32_t TebTlsSlot(int index) { return CurrentThread()->teb + kTebTlsSlots + 4 * index; }
 
+// ---- host context switch ----
+// native_fiber_switch(&from->sp, to->sp): saves the callee-saved registers on the current stack, stores the stack
+// pointer, switches to the other stack and restores its registers. A new stack is prepared so that the restore
+// "returns" into native_fiber_start with the Fiber* in a callee-saved register.
+extern "C" void native_fiber_switch(void** save_sp, void* to_sp);
+extern "C" void native_fiber_start();
+extern "C" void NativeFiberMain(void* fiber);
+
+#if defined(__x86_64__)
+asm(".text\n"
+    ".globl native_fiber_switch\n"
+    "native_fiber_switch:\n\t"
+    "pushq %rbp\n\tpushq %rbx\n\tpushq %r12\n\tpushq %r13\n\tpushq %r14\n\tpushq %r15\n\t"
+    "movq %rsp, (%rdi)\n\t"
+    "movq %rsi, %rsp\n\t"
+    "popq %r15\n\tpopq %r14\n\tpopq %r13\n\tpopq %r12\n\tpopq %rbx\n\tpopq %rbp\n\t"
+    "ret\n"
+    ".globl native_fiber_start\n"
+    "native_fiber_start:\n\t"
+    "movq %r12, %rdi\n\t"
+    "andq $-16, %rsp\n\t"
+    "call NativeFiberMain\n\t"
+    "ud2\n");
+constexpr int kSavedWords = 6;  // r15 r14 r13 r12 rbx rbp, then the return address
+void* PrepareStack(void* top, void* fiber) {
+    auto* sp = reinterpret_cast<uintptr_t*>((reinterpret_cast<uintptr_t>(top) & ~uintptr_t(15)) - 8);
+    *--sp = reinterpret_cast<uintptr_t>(&native_fiber_start);
+    for (int i = 0; i < kSavedWords; ++i) *--sp = 0;
+    sp[3] = reinterpret_cast<uintptr_t>(fiber);  // r12
+    return sp;
+}
+#elif defined(__aarch64__)
+asm(".text\n"
+    ".globl native_fiber_switch\n"
+    "native_fiber_switch:\n\t"
+    "sub sp, sp, #160\n\t"
+    "stp x19, x20, [sp, #0]\n\tstp x21, x22, [sp, #16]\n\tstp x23, x24, [sp, #32]\n\t"
+    "stp x25, x26, [sp, #48]\n\tstp x27, x28, [sp, #64]\n\tstp x29, x30, [sp, #80]\n\t"
+    "stp d8, d9, [sp, #96]\n\tstp d10, d11, [sp, #112]\n\tstp d12, d13, [sp, #128]\n\tstp d14, d15, [sp, #144]\n\t"
+    "mov x2, sp\n\tstr x2, [x0]\n\tmov sp, x1\n\t"
+    "ldp x19, x20, [sp, #0]\n\tldp x21, x22, [sp, #16]\n\tldp x23, x24, [sp, #32]\n\t"
+    "ldp x25, x26, [sp, #48]\n\tldp x27, x28, [sp, #64]\n\tldp x29, x30, [sp, #80]\n\t"
+    "ldp d8, d9, [sp, #96]\n\tldp d10, d11, [sp, #112]\n\tldp d12, d13, [sp, #128]\n\tldp d14, d15, [sp, #144]\n\t"
+    "add sp, sp, #160\n\t"
+    "ret\n"
+    ".globl native_fiber_start\n"
+    "native_fiber_start:\n\t"
+    "mov x0, x19\n\t"
+    "bl NativeFiberMain\n\t"
+    "brk #0\n");
+void* PrepareStack(void* top, void* fiber) {
+    auto* sp = reinterpret_cast<uintptr_t*>((reinterpret_cast<uintptr_t>(top) & ~uintptr_t(15)) - 160);
+    for (int i = 0; i < 20; ++i) sp[i] = 0;
+    sp[0] = reinterpret_cast<uintptr_t>(fiber);                         // x19
+    sp[11] = reinterpret_cast<uintptr_t>(&native_fiber_start);          // x30
+    return sp;
+}
+#else
+#error "no fiber context switch for this architecture"
+#endif
+
 // ---- fibers ----
 namespace {
 
@@ -63,7 +123,7 @@ struct Fiber {
     uint32_t handle;  // guest block: [0] fiber data (GetFiberData), [4] index
     uint32_t start, param;
     uint32_t stack_lo, stack_hi;
-    ucontext_t uc;
+    void* sp = nullptr;  // saved host stack pointer while switched out
     void* host_stack;
     bool is_thread;  // the converted thread itself (runs on the thread's own stacks)
 };
@@ -99,14 +159,18 @@ void SetCurrentFiber(GuestThread* t, Fiber* f) {
 
 thread_local uint32_t tl_thread_stack_hi = 0;
 
-void FiberMain(unsigned lo, unsigned hi) {
-    Fiber* f = reinterpret_cast<Fiber*>((uintptr_t(hi) << 32) | lo);
+}  // namespace
+
+extern "C" void NativeFiberMain(void* fiber) {
+    Fiber* f = static_cast<Fiber*>(fiber);
     GuestThread* t = CurrentThread();
     t->stack_hi = f->stack_hi;  // GuestCall starts from the fiber's own guest stack
     tl_ctx = nullptr;
     GuestCall(f->start, {f->param});
     Fatal("fiber %08x returned from its start routine", f->handle);
 }
+
+namespace {
 
 }  // namespace
 
@@ -129,12 +193,7 @@ uint32_t FiberCreate(uint32_t stack_size, uint32_t start, uint32_t param) {
     f->stack_hi = f->stack_lo + stack_size;
     constexpr size_t kHostStack = 4u << 20;  // recompiled C frames are larger than the guest frames
     f->host_stack = malloc(kHostStack);
-    getcontext(&f->uc);
-    f->uc.uc_stack.ss_sp = f->host_stack;
-    f->uc.uc_stack.ss_size = kHostStack;
-    f->uc.uc_link = nullptr;
-    uintptr_t p = reinterpret_cast<uintptr_t>(f);
-    makecontext(&f->uc, reinterpret_cast<void (*)()>(FiberMain), 2, unsigned(p), unsigned(p >> 32));
+    f->sp = PrepareStack(static_cast<uint8_t*>(f->host_stack) + kHostStack, f);
     return f->handle;
 }
 
@@ -148,7 +207,7 @@ void FiberSwitch(uint32_t handle) {
     Ctx* saved_ctx = tl_ctx;
     uint32_t saved_stack_hi = t->stack_hi;
     SetCurrentFiber(t, to);
-    swapcontext(&from->uc, &to->uc);
+    native_fiber_switch(&from->sp, to->sp);
     // Resumed.
     SetCurrentFiber(t, from);
     tl_ctx = saved_ctx;
