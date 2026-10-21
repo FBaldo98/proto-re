@@ -14,6 +14,7 @@ const protore::DiffTest g_tests[] = {
     {"core::Alloc/RoundUp/IoBuffer", &TestMemory},
     {"core::CementLibraryLoadStep", &TestCementLoad},
     {"core::CementLibrary lifetime/holder/methods", &TestCementLifetime},
+    {"core::File + CountedEvent", &TestFile},
 };
 
 }  // namespace

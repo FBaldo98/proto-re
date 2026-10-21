@@ -182,10 +182,15 @@ int InstallHooks(Hook* hooks, size_t count) {
     // PROTORE_ONLY=<name> installs just that hook, for bisecting behaviour changes to one function.
     char only[128] = "";
     GetEnvironmentVariableA("PROTORE_ONLY", only, sizeof(only));
+    // PROTORE_SKIP=<prefix> leaves every hook whose name starts with the prefix uninstalled.
+    char skip[128] = "";
+    GetEnvironmentVariableA("PROTORE_SKIP", skip, sizeof(skip));
+    const size_t skip_len = strlen(skip);
     int installed = 0;
     for (size_t i = 0; i < count; ++i) {
         Hook& h = hooks[i];
-        if (!h.enabled || (only[0] && strcmp(only, h.name) != 0)) {
+        if (!h.enabled || (only[0] && strcmp(only, h.name) != 0) ||
+            (skip_len && strncmp(h.name, skip, skip_len) == 0)) {
             continue;
         }
         if (!DetourAttach(&h.detour, h.rva, h.stolen_len, h.expected, h.expected_len, h.replacement, h.rel32_at)) {

@@ -2,6 +2,8 @@
 
 #include "../core/file_system.h"
 #include "../core/memory.h"
+#include "../core/event.h"
+#include "../core/file.h"
 #include "../core/mutex.h"
 #include "../core/cement_file_range.h"
 #include "../core/cement_library.h"
@@ -128,6 +130,114 @@ Hook g_hooks[] = {
     {"core::CementLibraryDeletingDestruct", 0x00650cb0,
      reinterpret_cast<void*>(&core::CementLibraryDeletingDestruct),
      {0x56, 0x8b, 0xf1, 0xe8, 0x78, 0xfa, 0xff, 0xff}, 8, 8, true, {}, 3},
+
+    // ---- counted event and TLS ----
+    {"core::CountedEventCreate", 0x0063d320, reinterpret_cast<void*>(&core::CountedEventCreate),
+     {0x8b, 0x44, 0x24, 0x08, 0x33, 0xc9}, 6, 6, true, {}},
+    {"core::CountedEventDestroy", 0x0063d350, reinterpret_cast<void*>(&core::CountedEventDestroy),
+     {0x56, 0x8b, 0x74, 0x24, 0x08}, 5, 5, true, {}},
+    {"core::CountedEventReset", 0x0063d390, reinterpret_cast<void*>(&core::CountedEventReset),
+     {0x8b, 0x4c, 0x24, 0x08, 0x56}, 5, 5, true, {}},
+    {"core::CountedEventSignal", 0x0063d3d0, reinterpret_cast<void*>(&core::CountedEventSignal),
+     {0x8b, 0x54, 0x24, 0x08, 0x85, 0xd2}, 6, 6, true, {}},
+    {"core::CountedEventWait", 0x0063d400, reinterpret_cast<void*>(&core::CountedEventWait),
+     {0x8b, 0x4c, 0x24, 0x04, 0x56}, 5, 5, true, {}},
+    {"core::ThreadLocalValue", 0x00644dc0, reinterpret_cast<void*>(&core::ThreadLocalValue),
+     {0xa1, 0x70, 0xa4, 0x27, 0x11}, 5, 5, true, {}},
+
+    // ---- core::File: pool ----
+    {"core::FileAllocate", 0x0064e050, reinterpret_cast<void*>(&core::FileAllocate),
+     {0x56, 0x68, 0x60, 0xca, 0x27, 0x11}, 6, 6, true, {}},
+    {"core::FileFree", 0x0064e0b0, reinterpret_cast<void*>(&core::FileFree),
+     {0x56, 0x68, 0x60, 0xca, 0x27, 0x11}, 6, 6, true, {}},
+    {"core::FilePoolShutdown", 0x0064e850, reinterpret_cast<void*>(&core::FilePoolShutdown),
+     {0x51, 0x56, 0x68, 0x60, 0xca, 0x27, 0x11}, 7, 7, true, {}},
+    {"core::FileSystemLock", 0x0064e200, reinterpret_cast<void*>(&core::FileSystemLock),
+     {0x68, 0x60, 0xca, 0x27, 0x11}, 5, 5, true, {}},
+    {"core::FileSystemUnlock", 0x0064e210, reinterpret_cast<void*>(&core::FileSystemUnlock),
+     {0x68, 0x60, 0xca, 0x27, 0x11}, 5, 5, true, {}},
+    {"core::FileSubObjectInit", 0x00650dd0, reinterpret_cast<void*>(&core::FileSubObjectInit),
+     {0x8b, 0xc1, 0x33, 0xc9, 0x89, 0x08}, 6, 6, true, {}},
+
+    // ---- core::File: lifetime ----
+    {"core::FileConstruct", 0x0064e9e0, reinterpret_cast<void*>(&core::FileConstruct),
+     {0x8b, 0x44, 0x24, 0x04, 0x8a, 0x54, 0x24, 0x0c}, 8, 8, true, {}},
+    {"core::FileConstructOpening", 0x0064e8d0, reinterpret_cast<void*>(&core::FileConstructOpening),
+     {0x8b, 0x44, 0x24, 0x04, 0x8a, 0x54, 0x24, 0x0c}, 8, 8, true, {}},
+    {"core::FileDestruct", 0x0064e100, reinterpret_cast<void*>(&core::FileDestruct),
+     {0x56, 0x8b, 0xf1, 0x80, 0x7e, 0x24, 0x00}, 7, 7, true, {}},
+    {"core::FileDeletingDestruct", 0x0064e8b0, reinterpret_cast<void*>(&core::FileDeletingDestruct),
+     {0x56, 0x8b, 0xf1, 0xe8, 0x48, 0xf8, 0xff, 0xff}, 8, 8, true, {}, 3},
+    {"core::FileAddRef", 0x0064e150, reinterpret_cast<void*>(&core::FileAddRef),
+     {0x56, 0x57, 0x8b, 0xf9, 0x8b, 0x47, 0x04}, 7, 7, true, {}},
+    {"core::FileRelease", 0x0064e170, reinterpret_cast<void*>(&core::FileRelease),
+     {0x56, 0x8b, 0xf1, 0x8b, 0x46, 0x04}, 6, 6, true, {}},
+
+    // ---- core::File: request accounting and waiting ----
+    {"core::FileBeginRequest", 0x0064e7f0, reinterpret_cast<void*>(&core::FileBeginRequest),
+     {0x56, 0x57, 0x8b, 0xf9, 0x8b, 0x47, 0x04}, 7, 7, true, {}},
+    {"core::FileEndRequest", 0x0064e810, reinterpret_cast<void*>(&core::FileEndRequest),
+     {0x56, 0x8b, 0xf1, 0x8b, 0x46, 0x04}, 6, 6, true, {}},
+    {"core::FileIsIdle", 0x0064e5d0, reinterpret_cast<void*>(&core::FileIsIdle),
+     {0x53, 0x56, 0x57, 0x8b, 0xf9}, 5, 5, true, {}},
+    {"core::FileWaitPolling", 0x0064e600, reinterpret_cast<void*>(&core::FileWaitPolling),
+     {0x56, 0x8b, 0xf1, 0x8b, 0x06}, 5, 5, true, {}},
+    {"core::FileWaitBlocking", 0x0064e640, reinterpret_cast<void*>(&core::FileWaitBlocking),
+     {0x56, 0x8b, 0xf1, 0x8b, 0x46, 0x04}, 6, 6, true, {}},
+    {"core::FileChangeDrive", 0x0064e790, reinterpret_cast<void*>(&core::FileChangeDrive),
+     {0x53, 0x56, 0x57, 0x8b, 0xf9}, 5, 5, true, {}},
+
+    // ---- core::File: asynchronous operations (push esi; push size; mov esi,ecx) ----
+    {"core::FileQueueD910", 0x0064e220, reinterpret_cast<void*>(&core::FileQueueD910),
+     {0x56, 0x6a, 0x0c, 0x8b, 0xf1}, 5, 5, true, {}},
+    {"core::FileQueueD950", 0x0064e260, reinterpret_cast<void*>(&core::FileQueueD950),
+     {0x56, 0x6a, 0x18, 0x8b, 0xf1}, 5, 5, true, {}},
+    {"core::FileQueueD9B0", 0x0064e2b0, reinterpret_cast<void*>(&core::FileQueueD9B0),
+     {0x56, 0x6a, 0x18, 0x8b, 0xf1}, 5, 5, true, {}},
+    {"core::FileQueueDA10", 0x0064e300, reinterpret_cast<void*>(&core::FileQueueDA10),
+     {0x56, 0x6a, 0x10, 0x8b, 0xf1}, 5, 5, true, {}},
+    {"core::FileQueueDA60", 0x0064e350, reinterpret_cast<void*>(&core::FileQueueDA60),
+     {0x56, 0x6a, 0x10, 0x8b, 0xf1}, 5, 5, true, {}},
+    {"core::FileQueueDAB0", 0x0064e3a0, reinterpret_cast<void*>(&core::FileQueueDAB0),
+     {0x56, 0x6a, 0x10, 0x8b, 0xf1}, 5, 5, true, {}},
+    {"core::FileQueueDB00", 0x0064e4e0, reinterpret_cast<void*>(&core::FileQueueDB00),
+     {0x56, 0x6a, 0x0c, 0x8b, 0xf1}, 5, 5, true, {}},
+    {"core::FileQueueD670", 0x0064e520, reinterpret_cast<void*>(&core::FileQueueD670),
+     {0x56, 0x57, 0x6a, 0x18, 0x8b, 0xf1}, 6, 6, true, {}},
+    {"core::FileQueueD5E0", 0x0064e580, reinterpret_cast<void*>(&core::FileQueueD5E0),
+     {0x56, 0x6a, 0x10, 0x8b, 0xf1}, 5, 5, true, {}},
+
+    // ---- core::File: synchronous wrappers ----
+    {"core::FileSlot3AndWait", 0x0064e3f0, reinterpret_cast<void*>(&core::FileSlot3AndWait),
+     {0x8b, 0x54, 0x24, 0x08, 0x56}, 5, 5, true, {}},
+    {"core::FileSlot4AndWait", 0x0064e420, reinterpret_cast<void*>(&core::FileSlot4AndWait),
+     {0x8b, 0x54, 0x24, 0x08, 0x56}, 5, 5, true, {}},
+    {"core::FileSlot5AndWait", 0x0064e450, reinterpret_cast<void*>(&core::FileSlot5AndWait),
+     {0x56, 0x8b, 0xf1, 0x8b, 0x4c, 0x24, 0x08}, 7, 7, true, {}},
+    {"core::FileSlot6AndWait", 0x0064e470, reinterpret_cast<void*>(&core::FileSlot6AndWait),
+     {0x56, 0x8b, 0xf1, 0x8b, 0x4c, 0x24, 0x08}, 7, 7, true, {}},
+    {"core::FileSlot7AndWait", 0x0064e490, reinterpret_cast<void*>(&core::FileSlot7AndWait),
+     {0x56, 0x8b, 0xf1, 0x8b, 0x4c, 0x24, 0x08}, 7, 7, true, {}},
+    {"core::FileSlot8AndWait", 0x0064e4b0, reinterpret_cast<void*>(&core::FileSlot8AndWait),
+     {0x56, 0x8b, 0xf1, 0x8b, 0x06}, 5, 5, true, {}},
+
+    // ---- core::File: accessors ----
+    {"core::FileStatusLocked", 0x0064e6b0, reinterpret_cast<void*>(&core::FileStatusLocked),
+     {0x56, 0x57, 0x8b, 0xf9, 0x8b, 0x47, 0x04}, 7, 7, true, {}},
+    {"core::FileNameChecked", 0x0064e6f0, reinterpret_cast<void*>(&core::FileNameChecked),
+     {0x56, 0x8b, 0xf1, 0x8b, 0x4e, 0x0c}, 6, 6, true, {}},
+    {"core::FileDriveSlot4", 0x0064e720, reinterpret_cast<void*>(&core::FileDriveSlot4),
+     {0x8b, 0x49, 0x0c, 0x8b, 0x01}, 5, 5, true, {}},
+    {"core::FileField134", 0x0064e4d0, reinterpret_cast<void*>(&core::FileField134),
+     {0x8b, 0x81, 0x34, 0x01, 0x00, 0x00}, 6, 6, true, {}},
+    {"core::FileFlag16c", 0x0064e750, reinterpret_cast<void*>(&core::FileFlag16c),
+     {0x8a, 0x81, 0x6c, 0x01, 0x00, 0x00}, 6, 6, true, {}},
+    {"core::FileBlockSize", 0x0064e760, reinterpret_cast<void*>(&core::FileBlockSize),
+     {0x8b, 0x81, 0x70, 0x01, 0x00, 0x00}, 6, 6, true, {}},
+    {"core::FileSetField12c", 0x0064e770, reinterpret_cast<void*>(&core::FileSetField12c),
+     {0x8b, 0x44, 0x24, 0x04, 0x89, 0x81, 0x2c, 0x01, 0x00, 0x00}, 10, 10, true, {}},
+    {"core::FileSubObject", 0x0064e780, reinterpret_cast<void*>(&core::FileSubObject),
+     {0x8d, 0x81, 0x38, 0x01, 0x00, 0x00}, 6, 6, true, {}},
 };
 
 }  // namespace

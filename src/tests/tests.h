@@ -18,5 +18,6 @@ void TestCementState(protore::DiffResult* r);
 void TestMemory(protore::DiffResult* r);
 void TestCementLoad(protore::DiffResult* r);
 void TestCementLifetime(protore::DiffResult* r);
+void TestFile(protore::DiffResult* r);
 
 }  // namespace tests
