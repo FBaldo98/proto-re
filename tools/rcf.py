@@ -13,7 +13,8 @@ Layout (observed on Prototype PC build 19788432):
   dir:  count * {u32 name_hash, u32 offset, u32 size}   (sorted by hash)
   names: u32 alignment, u32 reserved, then count * {
            u32 timestamp, u32 alignment, u32 reserved, u32 len, char name[len], u8 pad[3] }
-Mapping of names to directory entries is verified by `check` (see find_mapping).
+name_hash is the engine's core::HashFileName (matches all 18,044 entries of the shipped archives); names are
+attached to directory entries by hash, with file-offset order as a fallback for archives where it fails.
 
 Names mostly carry a ".rz" suffix: {char[4] "RZ\\0\\0", u32 0, u32 unpacked_size, u32 0} followed
 by one zlib stream. `extract --unrz` writes the unpacked file without the ".rz" suffix.
@@ -76,9 +77,18 @@ def read_names(f, names_off, names_size, count):
     return names
 
 
-def name_hash(name):
-    """Candidate Cement name hash (CRC-32 of lower-cased name); unconfirmed, offset order is the fallback."""
-    return zlib.crc32(name.lower().encode("latin-1")) & 0xFFFFFFFF
+def name_hash(name, seed=0):
+    """core::HashFileName: strip one leading '\\', then h = h * 31 + c over signed chars, with every char
+    below 'a' shifted up by 0x20."""
+    if name.startswith("\\"):
+        name = name[1:]
+    h = seed
+    for b in name.encode("latin-1"):
+        c = b - 256 if b >= 128 else b
+        if c < 0x61:
+            c += 0x20
+        h = (h * 31 + c) & 0xFFFFFFFF
+    return h
 
 
 def open_rcf(path):
@@ -139,4 +149,9 @@ def main(argv):
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv))
+    try:
+        sys.exit(main(sys.argv))
+    except BrokenPipeError:
+        # Output piped into `head` and closed early; not an error.
+        sys.stderr.close()
+        sys.exit(0)

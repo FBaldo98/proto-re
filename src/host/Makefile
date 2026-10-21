@@ -6,10 +6,10 @@ LDFLAGS := -shared -static -static-libgcc -static-libstdc++ -Wl,--enable-stdcall
 OUT := ../../build/host
 
 # Each module directory under src/ (relative to this Makefile) and its sources.
-HOST_SRCS := dllmain.cpp hooks.cpp registry.cpp difftest.cpp
-CORE_SRCS := report.cpp
+HOST_SRCS := dllmain.cpp hooks.cpp registry.cpp difftest.cpp probes.cpp memwatch.cpp
+CORE_SRCS := report.cpp name_hash.cpp
 MATH_SRCS := vector_trace.cpp
-TEST_SRCS := tests.cpp report_capture.cpp report_test.cpp vector_trace_test.cpp
+TEST_SRCS := tests.cpp report_capture.cpp report_test.cpp vector_trace_test.cpp name_hash_test.cpp
 
 OBJS := $(HOST_SRCS:%.cpp=$(OUT)/host/%.o) \
         $(CORE_SRCS:%.cpp=$(OUT)/core/%.o) \

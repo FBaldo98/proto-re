@@ -6,6 +6,7 @@
 
 #include "difftest.h"
 #include "hooks.h"
+#include "probes.h"
 #include "registry.h"
 
 namespace {
@@ -43,6 +44,7 @@ BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
             if (GetEnvironmentVariableA("PROTORE_DIFFTEST", nullptr, 0) != 0) {
                 protore::InstallDiffTestTrigger();
             }
+            protore::InstallProbes();
         }
     }
     return TRUE;
