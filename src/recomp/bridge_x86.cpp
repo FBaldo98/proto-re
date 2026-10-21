@@ -33,11 +33,17 @@ extern const struct RecompEntryPatch {
 } g_recomp_entries[];
 extern const uint32_t g_recomp_entry_count;
 uint8_t* RecompMemoryBase = nullptr;
+volatile uint32_t RecompRestrictLo = 0;
+volatile uint32_t RecompRestrictHi = 0xffffffffu;
+volatile uint32_t RecompTestDetours = 0;
 }
 
 namespace {
 
 constexpr size_t kHostStackSize = 1 << 20;
+
+// EngineService is always recompiled: its entries count the frames that tell a healthy run from a stuck one.
+constexpr uint32_t kFrameProbeVa = 0x1085eb20u;
 
 // Packed to 4: the assembly below uses fixed offsets, and fldl/fstpl do not need 8-byte alignment.
 #pragma pack(push, 4)
@@ -100,6 +106,15 @@ extern "C" ExitRecord* RecompEnterC(EntryFrame* frame) {
     if ((n & (n - 1)) == 0 && n >= 1024) {
         protore::Log("recomp: %ld entries into recompiled code", n);
     }
+    // Frame counter: EngineService (rva 0x0085eb20) is called once per frame by prototypef.exe.
+    static RecompFn engine_service = RecompLookup(kFrameProbeVa);
+    static volatile LONG frames = 0;
+    if (frame->fn == engine_service) {
+        LONG f = InterlockedIncrement(&frames);
+        if ((f & (f - 1)) == 0) {
+            protore::Log("recomp: frames %ld", f);
+        }
+    }
     Bridge* b = ThreadBridge();
     const uint32_t saved_top = b->host_top;
     uint32_t here;
@@ -119,6 +134,11 @@ extern "C" ExitRecord* RecompEnterC(EntryFrame* frame) {
     ctx.fpu_cw = 0x027f;
     asm volatile("movl %%fs:0x18, %0" : "=r"(ctx.fs_base));  // TEB self pointer
     frame->fn(&ctx);
+    // EngineInitialize's result decides whether the exe enters its main loop or calls EngineTerminate.
+    static RecompFn engine_initialize = RecompLookup(0x1085efb0u);
+    if (frame->fn == engine_initialize) {
+        protore::Log("recomp: EngineInitialize returned %08x", ctx.eax);
+    }
 
     static thread_local ExitRecord exit_record;
     ExitRecord& r = exit_record;
@@ -250,10 +270,36 @@ void LoadRange() {
         g_range_hi = strtoul(strchr(text, '-') + 1, nullptr, 16);
         protore::Log("recomp: range %08x-%08x", g_range_lo, g_range_hi);
     }
+    RecompRestrictLo = g_range_lo;
+    RecompRestrictHi = g_range_hi;
+}
+
+// Open-addressing hash of every recompiled entry, for calls through computed addresses.
+constexpr uint32_t kHashBits = 18;
+struct HashSlot {
+    uint32_t va;
+    RecompFn fn;
+};
+HashSlot* g_hash = nullptr;
+
+uint32_t HashOf(uint32_t va) {
+    return (va * 2654435761u) >> (32 - kHashBits);
+}
+
+void BuildHash() {
+    g_hash = static_cast<HashSlot*>(
+        VirtualAlloc(nullptr, sizeof(HashSlot) << kHashBits, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    for (uint32_t i = 0; i < g_recomp_count; ++i) {
+        uint32_t h = HashOf(g_recomp_table[i].va);
+        while (g_hash[h].va) {
+            h = (h + 1) & ((1u << kHashBits) - 1);
+        }
+        g_hash[h] = {g_recomp_table[i].va, g_recomp_table[i].fn};
+    }
 }
 
 bool InRange(uint32_t va) {
-    return va >= g_range_lo && va < g_range_hi;
+    return va == kFrameProbeVa || (va >= g_range_lo && va < g_range_hi);
 }
 
 }  // namespace
@@ -262,8 +308,17 @@ extern "C" RecompFn RecompLookup(uint32_t target) {
     if (!InRange(target)) {
         return nullptr;
     }
-    const void* hit = bsearch(&target, g_recomp_table, g_recomp_count, sizeof(RecompTableEntry), &Compare);
-    return hit ? static_cast<const RecompTableEntry*>(hit)->fn : nullptr;
+    if (!g_hash) {
+        BuildHash();
+    }
+    for (uint32_t h = HashOf(target);; h = (h + 1) & ((1u << kHashBits) - 1)) {
+        if (g_hash[h].va == target) {
+            return g_hash[h].fn;
+        }
+        if (!g_hash[h].va) {
+            return nullptr;
+        }
+    }
 }
 
 extern "C" void RecompDispatch(Ctx* ctx, uint32_t target) {

@@ -16,7 +16,7 @@ TEST_SRCS := tests.cpp report_capture.cpp report_test.cpp vector_trace_test.cpp 
 # prototype (default) or the whole engine (../../build/recomp/all).
 CC := i686-w64-mingw32-gcc
 RECOMP_DIR ?= ../../build/recomp/gen
-RECOMP_CFLAGS := -std=c11 -O1 -msse2 -mfpmath=sse -fno-strict-aliasing -w -I../recomp
+RECOMP_CFLAGS := -std=c11 -O2 -msse2 -mfpmath=sse -fno-strict-aliasing -w -I../recomp
 RECOMP_GEN := $(wildcard $(RECOMP_DIR)/*.c)
 RECOMP_OBJ_DIR := $(OUT)/recomp_gen/$(notdir $(RECOMP_DIR))
 RECOMP_OBJS := $(RECOMP_GEN:$(RECOMP_DIR)/%.c=$(RECOMP_OBJ_DIR)/%.o)

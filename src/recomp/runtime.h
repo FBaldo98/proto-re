@@ -44,6 +44,13 @@ void RecompDispatch(Ctx* ctx, uint32_t target);
 /* Looks up the recompiled implementation of a guest function entry, or null. */
 RecompFn RecompLookup(uint32_t target);
 
+/* Direct calls between recompiled functions are allowed unless the embedding restricts them (bisect range, test
+ * detours in the in-process prototype). */
+extern volatile uint32_t RecompRestrictLo, RecompRestrictHi, RecompTestDetours;
+static inline int RecompDirect(uint32_t target) {
+    return RecompTestDetours == 0 && target >= RecompRestrictLo && target < RecompRestrictHi;
+}
+
 /* ---- memory ---- */
 static inline uint8_t* G(uint32_t a) { return RecompMemoryBase + a; }
 static inline uint8_t R8(uint32_t a) { return *G(a); }

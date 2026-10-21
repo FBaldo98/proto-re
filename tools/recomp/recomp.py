@@ -125,6 +125,7 @@ class FunctionCompiler:
         self.out = []
         self.unsupported = collections.Counter()
         self.table_targets = {}  # address of a computed jmp -> list of its table targets
+        self.direct_calls = set()  # recompiled functions called directly (need a prototype in the output)
         self.ins = self.decode()
 
     # ---- operands ----
@@ -272,6 +273,9 @@ class FunctionCompiler:
     def jump_to(self, d):
         if self.inside(d):
             return f"goto L_{d:08x};"
+        if d in self.known:
+            self.direct_calls.add(d)
+            return f"if (RecompDirect(0x{d:08x}u)) f_{d:08x}(c); else RecompDispatch(c, 0x{d:08x}u); return;"
         return f"RecompDispatch(c, 0x{d:08x}u); return;"
 
     # ---- instructions ----
@@ -456,7 +460,12 @@ class FunctionCompiler:
             if is_iat and (op.mem.disp & 0xffffffff) in LONGJMP_IAT:
                 return "RecompLongjmp(c, R32(c->esp), R32(c->esp + 4u));"
             if ops[0].type == X.X86_OP_IMM:
-                return f"Push32(c, 0x{nxt:08x}u); RecompDispatch(c, 0x{ops[0].imm & 0xffffffff:08x}u);"
+                t = ops[0].imm & 0xffffffff
+                if t in self.known:
+                    self.direct_calls.add(t)
+                    return (f"Push32(c, 0x{nxt:08x}u); if (RecompDirect(0x{t:08x}u)) f_{t:08x}(c); "
+                            f"else RecompDispatch(c, 0x{t:08x}u);")
+                return f"Push32(c, 0x{nxt:08x}u); RecompDispatch(c, 0x{t:08x}u);"
             return f"{{ uint32_t t = {self.read(ins, ops[0])}; Push32(c, 0x{nxt:08x}u); RecompDispatch(c, t); }}"
         if base == "ret":
             n = ops[0].imm if ops else 0
@@ -970,7 +979,8 @@ class FunctionCompiler:
                 self.unsupported[str(e)] += 1
                 line = f'RecompUnimplemented(c, 0x{i.address:08x}u, "{i.mnemonic} {i.op_str}"); return;'
             body.append((i, line))
-        out = [f"void f_{self.va:08x}(Ctx* c) {{"]
+        out = [f"void f_{t:08x}(Ctx* c);" for t in sorted(self.direct_calls - {self.va})]
+        out.append(f"void f_{self.va:08x}(Ctx* c) {{")
         trap_labels = set()
         for n, (i, line) in enumerate(body):
             if i.address in labels:
@@ -1083,11 +1093,12 @@ def main():
     unsupported = collections.Counter()
     funcs = []
     patches = []
+    compiled = {va for va in vas if va in sizes}
     for va in vas:
         if va not in sizes:
             print(f"skip {va:#x}: not a function start", file=sys.stderr)
             continue
-        fc = FunctionCompiler(md, pe, va, sizes[va], set(sizes))
+        fc = FunctionCompiler(md, pe, va, sizes[va], compiled)
         funcs.append((va, fc.compile()))
         unsupported.update(fc.unsupported)
         patch = entry_patch(fc)

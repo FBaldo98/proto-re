@@ -163,6 +163,12 @@ size_t g_test_detour_count = 0;
 
 }  // namespace
 
+}  // namespace protore
+
+extern "C" volatile uint32_t RecompTestDetours;
+
+namespace protore {
+
 bool TestDetourActive(uint32_t va) {
     for (size_t i = 0; i < g_test_detour_count; ++i) {
         if (g_test_detours[i] == va) {
@@ -175,6 +181,7 @@ bool TestDetourActive(uint32_t va) {
 TestDetour::TestDetour(uint32_t rva, size_t stolen_len, const uint8_t* expected, size_t expected_len,
                        void* replacement, int rel32_at) {
     rva_ = rva;
+    ++RecompTestDetours;
     if (g_test_detour_count < kMaxTestDetours) {
         g_test_detours[g_test_detour_count++] = static_cast<uint32_t>(kEngineImageBase) + rva;
     }
@@ -192,6 +199,7 @@ TestDetour::TestDetour(uint32_t rva, size_t stolen_len, const uint8_t* expected,
 
 TestDetour::~TestDetour() {
     DetourDetach(&detour_);
+    --RecompTestDetours;
     for (size_t i = g_test_detour_count; i-- > 0;) {
         if (g_test_detours[i] == static_cast<uint32_t>(kEngineImageBase) + rva_) {
             g_test_detours[i] = g_test_detours[--g_test_detour_count];
