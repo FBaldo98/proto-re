@@ -74,6 +74,23 @@ MANUAL_DEFS = {"fcomi": STATUS, "fcomip": STATUS, "fucomi": STATUS, "fucomip": S
                "sahf": STATUS, "popfd": ALL_FLAGS, "cmpxchg8b": 0b10}
 MANUAL_USES = {"lahf": STATUS, "pushfd": ALL_FLAGS}
 
+# Architectural flag effects of the integer ALU, OR-ed into capstone's: capstone 5.0.7 reports no flags at all for
+# some encodings (e.g. `test byte ptr [mem], r8`), which made liveness drop flags a following jcc reads.
+_CF, _ZF, _SF, _OF, _PF, _AF = (1 << k for k in range(6))
+for _m in ("add", "sub", "adc", "sbb", "cmp", "and", "or", "xor", "test", "neg", "cmpxchg", "xadd"):
+    MANUAL_DEFS.setdefault(_m, STATUS)
+for _m in ("inc", "dec"):
+    MANUAL_DEFS.setdefault(_m, STATUS & ~_CF)
+for _m in ("adc", "sbb", "rcl", "rcr", "cmc"):
+    MANUAL_USES.setdefault(_m, _CF)
+# Condition codes read by jcc/setcc/cmovcc, by suffix.
+_COND_USES = {"o": _OF, "no": _OF, "b": _CF, "ae": _CF, "e": _ZF, "ne": _ZF, "be": _CF | _ZF, "a": _CF | _ZF,
+              "s": _SF, "ns": _SF, "p": _PF, "np": _PF, "l": _SF | _OF, "ge": _SF | _OF,
+              "le": _ZF | _SF | _OF, "g": _ZF | _SF | _OF}
+for _cc, _u in _COND_USES.items():
+    for _prefix in ("j", "set", "cmov"):
+        MANUAL_USES.setdefault(_prefix + _cc, _u)
+
 
 def flag_sets(ins):
     """(defs, uses) as bit sets over FLAG_NAMES."""
