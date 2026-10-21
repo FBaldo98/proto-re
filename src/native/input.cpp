@@ -107,6 +107,9 @@ void Mouse(uint32_t msg, uint32_t wparam, uint32_t lparam) {
 void InitInput(uint32_t keyboard_service, uint32_t mouse_service) {
     g_keyboard_service = keyboard_service;
     g_mouse_service = mouse_service;
+    // Windows sends WM_MOUSEMOVE as soon as the window is under the cursor; the engine treats the mouse as a
+    // connected controller only after its first message, and the front end expects it to be there.
+    Mouse(kWmMouseMove, 0, uint32_t(g_client_h / 2) << 16 | uint32_t(g_client_w / 2));
 }
 
 void ForwardInput(const SDL_Event& e) {

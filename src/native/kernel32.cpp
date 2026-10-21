@@ -740,6 +740,8 @@ K(CreateFileA) {
         mkdir(dir.c_str(), 0755);
     }
     int fd = open(host.c_str(), flags | O_CLOEXEC, 0644);
+    static const bool trace = getenv("PROTORE_TRACE_FILES") != nullptr;
+    if (trace) Log("CreateFileA(%s, %x, disp %u) -> %s", name, access, disposition, fd < 0 ? strerror(errno) : "ok");
     if (fd < 0) {
         SetLastError(ErrnoToWin(errno));
         Return(c, kInvalidHandle, 7);

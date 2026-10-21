@@ -11,6 +11,8 @@
 
 namespace native {
 
+bool CreateXAudio2(uint32_t clsid, uint32_t out, uint32_t* hr);  // xaudio2.cpp
+
 namespace {
 
 auto g_start = std::chrono::steady_clock::now();
@@ -63,6 +65,14 @@ F(PathRelativePathToA) { Return(c, 0, 5); }
 F(CoInitialize) { Return(c, 0, 1); }
 F(CoUninitialize) { Return(c, 0); }
 F(CoCreateInstance) {
+    uint32_t hr;
+    if (CreateXAudio2(Arg(c, 0), Arg(c, 4), &hr)) {
+        Return(c, hr, 5);
+        return;
+    }
+    const uint8_t* g = Ptr<uint8_t>(Arg(c, 0));
+    Log("CoCreateInstance({%08x-%04x-%04x-%02x%02x-...}): class not available", R32(Arg(c, 0)), R16(Arg(c, 0) + 4),
+        R16(Arg(c, 0) + 6), g[8], g[9]);
     if (Arg(c, 4)) W32(Arg(c, 4), 0);
     Return(c, 0x80040154u, 5);  // REGDB_E_CLASSNOTREG
 }
@@ -123,6 +133,7 @@ F(WSACancelAsyncRequest) { Return(c, 0, 1); }
 #undef F
 
 #define E(dll, name) {dll, #name, x_##name}
+#define O(ord, name) {"ws2_32.dll", "#" #ord, x_##name}
 const ImportDef kMisc[] = {
     E("winmm.dll", timeGetTime), E("winmm.dll", timeSetEvent), E("winmm.dll", timeKillEvent),
     E("winmm.dll", waveOutGetNumDevs), E("winmm.dll", waveOutGetDevCapsA), E("winmm.dll", waveOutOpen),
@@ -147,8 +158,12 @@ const ImportDef kMisc[] = {
     E("ws2_32.dll", socket), E("ws2_32.dll", closesocket), E("ws2_32.dll", htons), E("ws2_32.dll", ntohs),
     E("ws2_32.dll", htonl), E("ws2_32.dll", ntohl), E("ws2_32.dll", getaddrinfo), E("ws2_32.dll", freeaddrinfo),
     E("ws2_32.dll", WSAAsyncGetHostByName), E("ws2_32.dll", WSACancelAsyncRequest),
+    // The engine imports WS2_32 by ordinal.
+    O(3, closesocket), O(8, htonl), O(9, htons), O(14, ntohl), O(15, ntohs), O(23, socket), O(103, WSAAsyncGetHostByName),
+    O(108, WSACancelAsyncRequest), O(111, WSAGetLastError), O(115, WSAStartup), O(116, WSACleanup),
 };
 #undef E
+#undef O
 ImportRegistrar g_misc(kMisc);
 
 }  // namespace
