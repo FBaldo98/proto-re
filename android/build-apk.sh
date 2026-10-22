@@ -26,8 +26,10 @@ javac --release 11 -nowarn -cp "$PLATFORM_JAR" -d "$OUT/classes" \
 "$BUILD_TOOLS/d8" --release --min-api 26 --lib "$PLATFORM_JAR" --output "$OUT/dex" \
     $(find "$OUT/classes" -name '*.class')
 
+# Resources (launcher icon; tools/make_icon.py draws it).
+"$BUILD_TOOLS/aapt2" compile --dir "$ROOT/android/res" -o "$OUT/res.zip"
 "$BUILD_TOOLS/aapt2" link -o "$OUT/base.apk" -I "$PLATFORM_JAR" --manifest "$ROOT/android/AndroidManifest.xml" \
-    --min-sdk-version 26 --target-sdk-version 35
+    -R "$OUT/res.zip" --auto-add-overlay --min-sdk-version 26 --target-sdk-version 35
 
 cp "$OUT/dex/classes.dex" "$OUT/pkg/"
 for abi in "${ABIS[@]}"; do

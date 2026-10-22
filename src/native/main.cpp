@@ -10,9 +10,11 @@
 #include <unistd.h>
 #ifdef __ANDROID__
 #include <android/log.h>
+#include <jni.h>
 #endif
 
 #include <atomic>
+#include <chrono>
 #include <cerrno>
 #include <cstdarg>
 #include <cstdlib>
@@ -74,6 +76,37 @@ void InjectKey(SDL_Scancode sc, bool down);
 extern SDL_Window* g_sdl_window;
 
 }  // namespace native
+
+
+// ---- performance counters and frame limiter (read by the on-screen overlay through JNI) ----
+namespace native {
+std::atomic<float> g_fps{0}, g_frame_ms{0};
+std::atomic<int> g_fps_limit{0};  // 0 = no limit (the swap interval still applies)
+
+static long ResidentMiB() {
+    long pages = 0, resident = 0;
+    if (FILE* f = fopen("/proc/self/statm", "r")) {
+        if (fscanf(f, "%ld %ld", &pages, &resident) != 2) resident = 0;
+        fclose(f);
+    }
+    return resident * (sysconf(_SC_PAGESIZE) / 1024) / 1024;
+}
+}  // namespace native
+
+#ifdef __ANDROID__
+extern "C" JNIEXPORT jfloat JNICALL Java_com_protore_game_TouchControls_nativeFps(JNIEnv*, jclass) {
+    return native::g_fps.load();
+}
+extern "C" JNIEXPORT jfloat JNICALL Java_com_protore_game_TouchControls_nativeFrameMs(JNIEnv*, jclass) {
+    return native::g_frame_ms.load();
+}
+extern "C" JNIEXPORT jint JNICALL Java_com_protore_game_TouchControls_nativeMemoryMiB(JNIEnv*, jclass) {
+    return jint(native::ResidentMiB());
+}
+extern "C" JNIEXPORT void JNICALL Java_com_protore_game_TouchControls_nativeSetFpsLimit(JNIEnv*, jclass, jint fps) {
+    native::g_fps_limit.store(fps);
+}
+#endif
 
 using namespace native;
 
@@ -211,8 +244,32 @@ int main(int argc, char** argv) {
     }
     static std::atomic<uint64_t> frames{0};
     StartWatchdog(&frames);
+    g_fps_limit.store(SettingInt("fps_limit", 0));
+    using Clock = std::chrono::steady_clock;
+    Clock::time_point stats_start = Clock::now(), frame_start = stats_start, next_log = stats_start;
+    uint64_t stats_frames = 0;
     for (uint64_t frame = 0;; ++frame) {
         frames.store(frame, std::memory_order_relaxed);
+        // Frame time, FPS over the last second, a perf line in the log every 30 s, and the optional limiter.
+        Clock::time_point now = Clock::now();
+        if (int limit = g_fps_limit.load(); limit > 0) {
+            Clock::time_point due = frame_start + std::chrono::microseconds(1000000 / limit);
+            if (now < due) {
+                std::this_thread::sleep_until(due);
+                now = Clock::now();
+            }
+        }
+        g_frame_ms.store(std::chrono::duration<float, std::milli>(now - frame_start).count());
+        frame_start = now;
+        if (++stats_frames, now - stats_start >= std::chrono::seconds(1)) {
+            g_fps.store(float(stats_frames) / std::chrono::duration<float>(now - stats_start).count());
+            stats_frames = 0;
+            stats_start = now;
+        }
+        if (now >= next_log) {
+            if (frame) Log("perf: %.1f fps, %.1f ms, %ld MiB resident", g_fps.load(), g_frame_ms.load(), ResidentMiB());
+            next_log = now + std::chrono::seconds(30);
+        }
         for (const Tap& t : taps) {
             if (t.key == SDL_SCANCODE_UNKNOWN) continue;
             if (frame == t.frame) InjectKey(t.key, true);

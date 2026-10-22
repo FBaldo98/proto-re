@@ -270,12 +270,14 @@ struct TexAdapt {
     D3DFORMAT format;   // what the guest asked for
     UINT width, height;
     UINT skip;          // guest level L is host level L - skip; levels below skip are dropped
-    bool decode;        // host texture is A8R8G8B8, guest writes DXT blocks
+    bool decode;        // host texture is decode_format, guest writes DXT blocks
+    D3DFORMAT decode_format;  // A8R8G8B8, or A1R5G5B5 for DXT1 (half the memory, keeps its 1-bit alpha)
 };
 std::unordered_map<void*, TexAdapt> g_adapt;  // host texture -> adaptation, only for adapted textures
 int g_skip_mips = -1;                          // resolved on first texture
 UINT g_skip_min_size = 512;                    // only textures at least this large (larger side) lose levels
 bool g_decode_dxt = false;
+bool g_decode_16bit = false;  // decode_16bit: DXT1 -> A1R5G5B5 (Android default when the GPU samples it)
 
 bool IsDxt(D3DFORMAT f) {
     return f == D3DFMT_DXT1 || f == D3DFMT_DXT2 || f == D3DFMT_DXT3 || f == D3DFMT_DXT4 || f == D3DFMT_DXT5;
@@ -321,7 +323,7 @@ TexAdapt PlanTexture(UINT w, UINT h, UINT levels, DWORD usage, D3DFORMAT format)
         Log("textures: skip %d mip level(s) of textures >= %u, decode DXT %s", g_skip_mips, g_skip_min_size,
             g_decode_dxt ? "on" : "off");
     }
-    TexAdapt a{format, w, h, 0, false};
+    TexAdapt a{format, w, h, 0, false, D3DFMT_A8R8G8B8};
     bool plain = !(usage & (D3DUSAGE_RENDERTARGET | D3DUSAGE_DEPTHSTENCIL | D3DUSAGE_DYNAMIC));
     if (plain && BlockBytes(format) && levels != 1 && (w > h ? w : h) >= g_skip_min_size) {
         UINT skip = UINT(g_skip_mips);
@@ -330,6 +332,7 @@ TexAdapt PlanTexture(UINT w, UINT h, UINT levels, DWORD usage, D3DFORMAT format)
         a.skip = skip;
     }
     a.decode = plain && g_decode_dxt && IsDxt(format);
+    if (a.decode && g_decode_16bit && format == D3DFMT_DXT1) a.decode_format = D3DFMT_A1R5G5B5;
     // Statistics: GPU memory of the top level as the guest asked for it and as created.
     static uint64_t count = 0, reduced = 0, decoded = 0, guest_bytes = 0, host_bytes = 0;
     UINT bb = BlockBytes(format);
@@ -338,7 +341,7 @@ TexAdapt PlanTexture(UINT w, UINT h, UINT levels, DWORD usage, D3DFORMAT format)
         uint64_t g = IsDxt(format) ? px * bb / 16 : px * bb;
         uint64_t hpx = px >> (2 * a.skip);
         guest_bytes += g;
-        host_bytes += a.decode ? hpx * 4 : g >> (2 * a.skip);
+        host_bytes += a.decode ? hpx * (a.decode_format == D3DFMT_A1R5G5B5 ? 2 : 4) : g >> (2 * a.skip);
     }
     ++count;
     reduced += a.skip != 0;
@@ -401,7 +404,9 @@ void DecodeBlock(D3DFORMAT f, const uint8_t* b, uint8_t px[16][4]) {
 }
 
 // Guest DXT data (`rows` block rows of `pitch` bytes) -> host BGRA pixels of a w x h region.
-void DecodeDxt(D3DFORMAT f, const uint8_t* src, UINT pitch, UINT w, UINT h, uint8_t* dst, INT dst_pitch) {
+void DecodeDxt(D3DFORMAT f, const uint8_t* src, UINT pitch, UINT w, UINT h, uint8_t* dst, INT dst_pitch,
+               D3DFORMAT dst_format) {
+    const bool packed16 = dst_format == D3DFMT_A1R5G5B5;
     UINT bw = (w + 3) / 4, bh = (h + 3) / 4, bytes = BlockBytes(f);
     uint8_t px[16][4];
     for (UINT by = 0; by < bh; ++by) {
@@ -409,7 +414,14 @@ void DecodeDxt(D3DFORMAT f, const uint8_t* src, UINT pitch, UINT w, UINT h, uint
             DecodeBlock(f, src + by * pitch + bx * bytes, px);
             for (UINT y = 0; y < 4 && by * 4 + y < h; ++y) {
                 for (UINT x = 0; x < 4 && bx * 4 + x < w; ++x) {
-                    memcpy(dst + INT(by * 4 + y) * dst_pitch + (bx * 4 + x) * 4, px[y * 4 + x], 4);
+                    const uint8_t* p = px[y * 4 + x];
+                    if (packed16) {  // B, G, R, A -> A1R5G5B5
+                        uint16_t v = uint16_t((p[3] >= 128 ? 0x8000 : 0) | (p[2] >> 3) << 10 | (p[1] >> 3) << 5 |
+                                              (p[0] >> 3));
+                        memcpy(dst + INT(by * 4 + y) * dst_pitch + (bx * 4 + x) * 2, &v, 2);
+                    } else {
+                        memcpy(dst + INT(by * 4 + y) * dst_pitch + (bx * 4 + x) * 4, p, 4);
+                    }
                 }
             }
         }
@@ -420,7 +432,7 @@ void DecodeDxt(D3DFORMAT f, const uint8_t* src, UINT pitch, UINT w, UINT h, uint
 struct AdaptedLock {
     uint32_t guest = 0, capacity = 0;  // guest buffer in the guest format
     UINT pitch = 0;
-    D3DFORMAT format = D3DFMT_UNKNOWN;
+    D3DFORMAT format = D3DFMT_UNKNOWN, decode_format = D3DFMT_A8R8G8B8;
     UINT width = 0, height = 0;         // region being written
     uint8_t* host = nullptr;            // locked host memory (decode target), null for dropped levels
     INT host_pitch = 0;
@@ -456,6 +468,7 @@ HRESULT AdaptedLockRect(void* tex, uint32_t sub, const TexAdapt& a, UINT level, 
     }
     l.pitch = pitch;
     l.format = a.format;
+    l.decode_format = a.decode_format;
     l.width = rect ? UINT(rect->right - rect->left) : w;
     l.height = rect ? UINT(rect->bottom - rect->top) : h;
     l.host = dropped ? nullptr : static_cast<uint8_t*>(lr.pBits);
@@ -473,7 +486,7 @@ bool AdaptedUnlock(void* tex, uint32_t sub, bool* host_locked) {
     AdaptedLock& l = it->second;
     *host_locked = l.host != nullptr;
     if (l.host) {
-        DecodeDxt(l.format, Ptr<uint8_t>(l.guest), l.pitch, l.width, l.height, l.host, l.host_pitch);
+        DecodeDxt(l.format, Ptr<uint8_t>(l.guest), l.pitch, l.width, l.height, l.host, l.host_pitch, l.decode_format);
         l.host = nullptr;
     }
     return true;
@@ -540,7 +553,15 @@ void x_Direct3DCreate9(Ctx* c) {
         bool bc = SUCCEEDED(d3d->CheckDeviceFormat(0, D3DDEVTYPE_HAL, D3DFMT_X8R8G8B8, 0, D3DRTYPE_TEXTURE,
                                                    D3DFMT_DXT5));
         g_decode_dxt = SettingInt("decode_dxt", bc ? 0 : 1) != 0;
-        Log("GPU BC (DXT) textures: %s, decoding %s", bc ? "supported" : "not supported", g_decode_dxt ? "on" : "off");
+        bool a1r5 = SUCCEEDED(d3d->CheckDeviceFormat(0, D3DDEVTYPE_HAL, D3DFMT_X8R8G8B8, 0, D3DRTYPE_TEXTURE,
+                                                     D3DFMT_A1R5G5B5));
+#ifdef __ANDROID__
+        g_decode_16bit = a1r5 && SettingInt("decode_16bit", 1) != 0;
+#else
+        g_decode_16bit = a1r5 && SettingInt("decode_16bit", 0) != 0;
+#endif
+        Log("GPU BC (DXT) textures: %s, decoding %s%s", bc ? "supported" : "not supported", g_decode_dxt ? "on" : "off",
+            g_decode_dxt && g_decode_16bit ? " (DXT1 as 16-bit)" : "");
     }
     Return(c, Wrap(d3d), 1);
 }
@@ -755,7 +776,7 @@ M(IDirect3DDevice9, CreateTexture) {
     TexAdapt a = PlanTexture(w, h, levels, usage, format);
     IDirect3DTexture9* tex = nullptr;
     HRESULT hr = Host<IDirect3DDevice9>(Arg(c, 0))->CreateTexture(
-        w >> a.skip, h >> a.skip, levels ? levels - a.skip : 0, usage, a.decode ? D3DFMT_A8R8G8B8 : format,
+        w >> a.skip, h >> a.skip, levels ? levels - a.skip : 0, usage, a.decode ? a.decode_format : format,
         D3DPOOL(Arg(c, 6)), &tex, nullptr);
     if (SUCCEEDED(hr) && (a.skip || a.decode)) {
         std::lock_guard<std::recursive_mutex> lock(g_mutex);
@@ -772,7 +793,7 @@ M(IDirect3DDevice9, CreateCubeTexture) {
     TexAdapt a = PlanTexture(edge, edge, levels, usage, format);
     IDirect3DCubeTexture9* tex = nullptr;
     HRESULT hr = Host<IDirect3DDevice9>(Arg(c, 0))->CreateCubeTexture(
-        edge >> a.skip, levels ? levels - a.skip : 0, usage, a.decode ? D3DFMT_A8R8G8B8 : format, D3DPOOL(Arg(c, 5)),
+        edge >> a.skip, levels ? levels - a.skip : 0, usage, a.decode ? a.decode_format : format, D3DPOOL(Arg(c, 5)),
         &tex, nullptr);
     if (SUCCEEDED(hr) && (a.skip || a.decode)) {
         std::lock_guard<std::recursive_mutex> lock(g_mutex);

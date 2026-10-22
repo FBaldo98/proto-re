@@ -1,116 +1,279 @@
 package com.protore.game;
 
+import android.app.Activity;
+import android.app.AlarmManager;
+import android.app.PendingIntent;
 import android.content.Context;
+import android.content.Intent;
+import android.content.SharedPreferences;
+import android.graphics.Bitmap;
+import android.graphics.BlurMaskFilter;
 import android.graphics.Canvas;
+import android.graphics.Color;
 import android.graphics.Paint;
+import android.graphics.Path;
 import android.graphics.RectF;
+import android.graphics.Typeface;
+import android.hardware.input.InputManager;
 import android.view.HapticFeedbackConstants;
+import android.view.InputDevice;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
 
 import org.libsdl.app.SDLActivity;
 
+import java.io.File;
+import java.io.FileWriter;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
- * On-screen controls drawn over the game. Everything goes into SDL as real keyboard and mouse input, so the engine
- * sees it both as window messages and through DirectInput.
+ * On-screen controls drawn over the game in the style of Prototype's interface (red neon on black, hexagons,
+ * bracket corners). Everything goes into SDL as real keyboard and mouse input, so the engine sees it both as window
+ * messages and through DirectInput.
  *
- * Two modes, switched with the button in the top-left corner:
- *  - menu: a touch is a left mouse click at that point (menus are mouse-driven), plus Enter and Esc buttons;
- *  - game: a stick on the left (WASD), action buttons on the right, and dragging anywhere else turns the camera
- *    (relative mouse motion, no click).
+ * Modes (button in the top-left corner):
+ *  - menu: a touch is a left mouse click at that point (menus are mouse-driven), plus Enter and Esc;
+ *  - game: a stick on the left (WASD), action buttons on the right, dragging anywhere else turns the camera.
+ * The gear opens the settings panel; the performance overlay shows FPS, frame time and memory.
  */
-public class TouchControls extends View {
-    private static final int MOUSE_LEFT = 1, MOUSE_RIGHT = 2;
+public class TouchControls extends View implements InputManager.InputDeviceListener {
+    // Performance counters and the frame limiter of the native host (main.cpp).
+    static native float nativeFps();
+    static native float nativeFrameMs();
+    static native int nativeMemoryMiB();
+    static native void nativeSetFpsLimit(int fps);
 
-    /** A round button: either a key (Android keycode) or a mouse button. Position in fractions of the view. */
+    private static final int MOUSE_LEFT = 1, MOUSE_RIGHT = 2;
+    private static final int RED = 0xffe0261e, RED_DIM = 0xff7a1410, INK = 0xff0b0b0b;
+
+    /** A hexagonal button: a key (Android keycode) or a mouse button. Position in fractions of the view. */
     private static final class Button {
         final String label;
         final int keycode, mouseButton;
-        final float fx, fy, radiusDp;
+        final float fx, fy, sizeDp;
         final boolean gameOnly;
         float cx, cy, r;
         int pointer = -1;
 
-        Button(String label, int keycode, int mouseButton, float fx, float fy, float radiusDp, boolean gameOnly) {
+        Button(String label, int keycode, int mouseButton, float fx, float fy, float sizeDp, boolean gameOnly) {
             this.label = label;
             this.keycode = keycode;
             this.mouseButton = mouseButton;
             this.fx = fx;
             this.fy = fy;
-            this.radiusDp = radiusDp;
+            this.sizeDp = sizeDp;
             this.gameOnly = gameOnly;
         }
 
         boolean hit(float x, float y) {
             float dx = x - cx, dy = y - cy;
-            return dx * dx + dy * dy <= r * r * 1.2f;
+            return dx * dx + dy * dy <= r * r * 1.25f;
         }
     }
 
     private final Button[] buttons = {
-        // always visible
-        new Button("Enter", KeyEvent.KEYCODE_ENTER, 0, 0.17f, 0.09f, 26, false),
-        new Button("Esc", KeyEvent.KEYCODE_ESCAPE, 0, 0.95f, 0.09f, 26, false),
-        // game mode: right-hand cluster
-        new Button("Удар", 0, MOUSE_LEFT, 0.90f, 0.74f, 46, true),
-        new Button("Спец", 0, MOUSE_RIGHT, 0.79f, 0.86f, 36, true),
-        new Button("Прыжок", KeyEvent.KEYCODE_SPACE, 0, 0.92f, 0.47f, 36, true),
-        new Button("Захват", KeyEvent.KEYCODE_E, 0, 0.79f, 0.62f, 32, true),
-        new Button("Бег", KeyEvent.KEYCODE_SHIFT_LEFT, 0, 0.68f, 0.86f, 30, true),
-        new Button("Цель", KeyEvent.KEYCODE_Q, 0, 0.82f, 0.38f, 28, true),
-        new Button("Силы", KeyEvent.KEYCODE_TAB, 0, 0.70f, 0.09f, 26, true),
+        new Button("ENTER", KeyEvent.KEYCODE_ENTER, 0, 0.19f, 0.10f, 24, false),
+        new Button("ESC", KeyEvent.KEYCODE_ESCAPE, 0, 0.86f, 0.10f, 24, false),
+        new Button("УДАР", 0, MOUSE_LEFT, 0.90f, 0.74f, 44, true),
+        new Button("СПЕЦ", 0, MOUSE_RIGHT, 0.79f, 0.87f, 34, true),
+        new Button("ПРЫЖОК", KeyEvent.KEYCODE_SPACE, 0, 0.93f, 0.47f, 34, true),
+        new Button("ЗАХВАТ", KeyEvent.KEYCODE_E, 0, 0.79f, 0.62f, 31, true),
+        new Button("БЕГ", KeyEvent.KEYCODE_SHIFT_LEFT, 0, 0.68f, 0.88f, 29, true),
+        new Button("ЦЕЛЬ", KeyEvent.KEYCODE_Q, 0, 0.83f, 0.38f, 27, true),
+        new Button("СИЛЫ", KeyEvent.KEYCODE_TAB, 0, 0.70f, 0.10f, 24, true),
     };
 
+    // ---- settings ----
+    private final SharedPreferences prefs;
+    private float opacity, scale;
+    private boolean vibrate, showFps, hideWithPad;
+    private boolean padConnected;
+
+    private static final class Setting {
+        final String label, key;     // key: preference name; engine settings also go to protore.ini
+        final String[] names;
+        final int[] values;
+        final boolean engine;        // read by the engine at start: needs a restart
+        int index;
+
+        Setting(String label, String key, String[] names, int[] values, boolean engine) {
+            this.label = label;
+            this.key = key;
+            this.names = names;
+            this.values = values;
+            this.engine = engine;
+        }
+
+        int value() {
+            return values[index];
+        }
+    }
+
+    private final Setting[] settings = {
+        new Setting("Разрешение", "render_height", new String[] {"540p", "720p", "900p", "1080p"},
+                new int[] {540, 720, 900, 1080}, true),
+        new Setting("Текстуры", "texture_skip_mips", new String[] {"Полные", "Половина", "Четверть"},
+                new int[] {0, 1, 2}, true),
+        new Setting("Лимит FPS", "fps_limit", new String[] {"Нет", "30", "45", "60"}, new int[] {0, 30, 45, 60},
+                true),
+        new Setting("Прозрачность", "ui_opacity", new String[] {"40%", "60%", "80%", "100%"},
+                new int[] {40, 60, 80, 100}, false),
+        new Setting("Размер кнопок", "ui_scale", new String[] {"80%", "100%", "120%", "140%"},
+                new int[] {80, 100, 120, 140}, false),
+        new Setting("Вибрация", "ui_vibrate", new String[] {"Выкл", "Вкл"}, new int[] {0, 1}, false),
+        new Setting("Показ FPS", "ui_fps", new String[] {"Выкл", "Вкл"}, new int[] {0, 1}, false),
+        new Setting("Скрывать при геймпаде", "ui_hide_pad", new String[] {"Выкл", "Вкл"}, new int[] {0, 1}, false),
+    };
+    private static final int[] DEFAULTS = {1, 1, 0, 2, 1, 1, 0, 1};
+    private boolean panelOpen = false, restartNeeded = false;
+    private final RectF panel = new RectF(), restartRect = new RectF(), closeRect = new RectF();
+    private final List<RectF> leftArrows = new ArrayList<>(), rightArrows = new ArrayList<>();
+
+    // ---- drawing ----
     private final float density;
-    private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG), stroke = new Paint(Paint.ANTI_ALIAS_FLAG),
-            text = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG), edge = new Paint(Paint.ANTI_ALIAS_FLAG),
+            glow = new Paint(Paint.ANTI_ALIAS_FLAG), text = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Path path = new Path();
     private boolean gameMode = false;
-    private final RectF modeRect = new RectF();
-    private int modePointer = -1;
+    private final RectF modeRect = new RectF(), gearRect = new RectF();
+    private int modePointer = -1, gearPointer = -1;
 
     // stick
-    private float stickX, stickY, stickR;
+    private float stickHomeX, stickHomeY, stickX, stickY, stickR, knobX, knobY;
     private int stickPointer = -1;
-    private float knobX, knobY;
     private final boolean[] dirDown = new boolean[4];  // W A S D
     private static final int[] DIR_KEYS = {KeyEvent.KEYCODE_W, KeyEvent.KEYCODE_A, KeyEvent.KEYCODE_S, KeyEvent.KEYCODE_D};
 
     // camera / menu pointer
     private int lookPointer = -1;
-    private float lookX, lookY;
+    private float lookX, lookY, lastMouseX, lastMouseY;
     private int mouseState = 0;
-    private float lastMouseX, lastMouseY;
     private final Map<Integer, Button> pointerButton = new HashMap<>();
 
     public TouchControls(Context context) {
         super(context);
         density = context.getResources().getDisplayMetrics().density;
-        stroke.setStyle(Paint.Style.STROKE);
-        stroke.setStrokeWidth(2 * density);
+        prefs = context.getSharedPreferences("controls", Context.MODE_PRIVATE);
+        for (int i = 0; i < settings.length; i++) {
+            Setting s = settings[i];
+            s.index = Math.max(0, Math.min(s.values.length - 1, prefs.getInt(s.key, DEFAULTS[i])));
+        }
+        applyUiSettings();
+        Typeface face = Typeface.create("sans-serif-condensed", Typeface.BOLD);
+        text.setTypeface(face);
         text.setTextAlign(Paint.Align.CENTER);
-        text.setColor(0xddffffff);
+        text.setLetterSpacing(0.08f);
+        edge.setStyle(Paint.Style.STROKE);
+        glow.setStyle(Paint.Style.STROKE);
+        glow.setMaskFilter(new BlurMaskFilter(6 * density, BlurMaskFilter.Blur.NORMAL));
         setHapticFeedbackEnabled(true);
+        InputManager im = (InputManager) context.getSystemService(Context.INPUT_SERVICE);
+        if (im != null) {
+            im.registerInputDeviceListener(this, null);
+            padConnected = findGamepad(im);
+        }
+        // Refresh the performance overlay twice a second.
+        postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                if (showFps) invalidate();
+                postDelayed(this, 500);
+            }
+        }, 500);
     }
 
+    // Glowing shapes are rendered once into bitmaps (blur needs the software pipeline) and then only blitted.
+    private final Map<String, Bitmap> cache = new HashMap<>();
+    private final Paint blit = new Paint(Paint.FILTER_BITMAP_FLAG);
+
+    private interface Painter {
+        void paint(Canvas c, float cx, float cy);
+    }
+
+    private Bitmap cached(String key, float halfSize, Painter painter) {
+        Bitmap b = cache.get(key);
+        if (b == null) {
+            int n = (int) Math.ceil(halfSize * 2);
+            b = Bitmap.createBitmap(n, n, Bitmap.Config.ARGB_8888);
+            Canvas c = new Canvas(b);
+            float saved = opacity;
+            opacity = 1f;  // opacity is applied when blitting
+            painter.paint(c, n / 2f, n / 2f);
+            opacity = saved;
+            cache.put(key, b);
+        }
+        return b;
+    }
+
+    private void blitCentered(Canvas c, Bitmap b, float cx, float cy) {
+        blit.setAlpha(Math.round(255 * opacity));
+        c.drawBitmap(b, cx - b.getWidth() / 2f, cy - b.getHeight() / 2f, blit);
+    }
+
+    private void applyUiSettings() {
+        cache.clear();
+        opacity = settings[3].value() / 100f;
+        scale = settings[4].value() / 100f;
+        vibrate = settings[5].value() != 0;
+        showFps = settings[6].value() != 0;
+        hideWithPad = settings[7].value() != 0;
+        layoutButtons(getWidth(), getHeight());
+    }
+
+    // ---- gamepads ----
+    private static boolean findGamepad(InputManager im) {
+        for (int id : im.getInputDeviceIds()) {
+            InputDevice d = im.getInputDevice(id);
+            if (d != null && !d.isVirtual() && (d.getSources() & InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void updatePads() {
+        InputManager im = (InputManager) getContext().getSystemService(Context.INPUT_SERVICE);
+        if (im != null) padConnected = findGamepad(im);
+        invalidate();
+    }
+
+    @Override public void onInputDeviceAdded(int id) { updatePads(); }
+    @Override public void onInputDeviceRemoved(int id) { updatePads(); }
+    @Override public void onInputDeviceChanged(int id) { updatePads(); }
+
+    private boolean controlsHidden() {
+        return hideWithPad && padConnected;
+    }
+
+    // ---- layout ----
     @Override
     protected void onSizeChanged(int w, int h, int oldw, int oldh) {
+        layoutButtons(w, h);
+        lastMouseX = w / 2f;
+        lastMouseY = h / 2f;
+    }
+
+    private void layoutButtons(int w, int h) {
         for (Button b : buttons) {
             b.cx = b.fx * w;
             b.cy = b.fy * h;
-            b.r = b.radiusDp * density;
+            b.r = b.sizeDp * density * scale;
         }
-        stickR = 64 * density;
-        stickX = 0.13f * w;
-        stickY = 0.70f * h;
-        knobX = stickX;
-        knobY = stickY;
-        modeRect.set(12 * density, 12 * density, 104 * density, 52 * density);
-        lastMouseX = w / 2f;
-        lastMouseY = h / 2f;
+        stickR = 62 * density * scale;
+        stickHomeX = 0.13f * w;
+        stickHomeY = 0.70f * h;
+        stickX = knobX = stickHomeX;
+        stickY = knobY = stickHomeY;
+        modeRect.set(14 * density, 14 * density, 110 * density, 52 * density);
+        gearRect.set(w - 58 * density, 12 * density, w - 14 * density, 56 * density);
+        float pw = Math.min(w * 0.62f, 560 * density), ph = Math.min(h * 0.86f, 470 * density);
+        panel.set((w - pw) / 2, (h - ph) / 2, (w + pw) / 2, (h + ph) / 2);
     }
 
     // ---- input to SDL ----
@@ -122,13 +285,9 @@ public class TouchControls extends View {
     private void mouseButton(int bit, boolean down, float x, float y) {
         lastMouseX = x;
         lastMouseY = y;
-        if (down) {
-            mouseState |= bit;
-            SDLActivity.onNativeMouse(mouseState, MotionEvent.ACTION_DOWN, x, y, false);
-        } else {
-            mouseState &= ~bit;
-            SDLActivity.onNativeMouse(mouseState, MotionEvent.ACTION_UP, x, y, false);
-        }
+        if (down) mouseState |= bit;
+        else mouseState &= ~bit;
+        SDLActivity.onNativeMouse(mouseState, down ? MotionEvent.ACTION_DOWN : MotionEvent.ACTION_UP, x, y, false);
     }
 
     private void mouseMoveTo(float x, float y) {
@@ -141,10 +300,14 @@ public class TouchControls extends View {
         SDLActivity.onNativeMouse(mouseState, MotionEvent.ACTION_MOVE, dx, dy, true);
     }
 
+    private void buzz() {
+        if (vibrate) performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
+    }
+
     private void press(Button b, int pointer) {
         b.pointer = pointer;
         pointerButton.put(pointer, b);
-        performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
+        buzz();
         if (b.mouseButton != 0) mouseButton(b.mouseButton, true, lastMouseX, lastMouseY);
         else key(b.keycode, true);
     }
@@ -178,22 +341,41 @@ public class TouchControls extends View {
     private void releaseStick() {
         stickPointer = -1;
         updateStick(stickX, stickY);
+        stickX = knobX = stickHomeX;
+        stickY = knobY = stickHomeY;
+    }
+
+    private void releaseAll() {
+        for (Button b : buttons) if (b.pointer >= 0) release(b);
+        if (stickPointer >= 0) releaseStick();
+        if (lookPointer >= 0 && !gameMode) mouseButton(MOUSE_LEFT, false, lookX, lookY);
+        lookPointer = -1;
     }
 
     private boolean visible(Button b) {
-        return gameMode || !b.gameOnly;
+        return !controlsHidden() && (gameMode || !b.gameOnly);
     }
 
+    // ---- touch ----
     @Override
     public boolean onTouchEvent(MotionEvent e) {
         int action = e.getActionMasked();
         int index = e.getActionIndex();
         int id = e.getPointerId(index);
         float x = e.getX(index), y = e.getY(index);
+        if (panelOpen) {
+            if (action == MotionEvent.ACTION_UP) panelTap(x, y);
+            invalidate();
+            return true;
+        }
         switch (action) {
             case MotionEvent.ACTION_DOWN:
             case MotionEvent.ACTION_POINTER_DOWN: {
-                if (modeRect.contains(x, y)) {
+                if (gearRect.contains(x, y)) {
+                    gearPointer = id;
+                    break;
+                }
+                if (!controlsHidden() && modeRect.contains(x, y)) {
                     modePointer = id;
                     break;
                 }
@@ -206,7 +388,8 @@ public class TouchControls extends View {
                 }
                 if (hit != null) {
                     press(hit, id);
-                } else if (gameMode && stickPointer < 0 && x < getWidth() * 0.4f && y > getHeight() * 0.35f) {
+                } else if (gameMode && !controlsHidden() && stickPointer < 0 && x < getWidth() * 0.4f
+                        && y > getHeight() * 0.35f) {
                     stickPointer = id;
                     stickX = x;  // the stick centres where the thumb lands
                     stickY = y;
@@ -238,34 +421,32 @@ public class TouchControls extends View {
                 break;
             case MotionEvent.ACTION_UP:
             case MotionEvent.ACTION_POINTER_UP:
-            case MotionEvent.ACTION_CANCEL:
-                if (action == MotionEvent.ACTION_CANCEL) {
-                    for (Button b : buttons) if (b.pointer >= 0) release(b);
-                    if (stickPointer >= 0) releaseStick();
-                    if (lookPointer >= 0 && !gameMode) mouseButton(MOUSE_LEFT, false, lookX, lookY);
-                    lookPointer = -1;
-                    modePointer = -1;
-                    break;
-                }
-                if (id == modePointer) {
+                if (id == gearPointer) {
+                    gearPointer = -1;
+                    if (gearRect.contains(x, y)) {
+                        releaseAll();
+                        panelOpen = true;
+                        buzz();
+                    }
+                } else if (id == modePointer) {
                     modePointer = -1;
                     if (modeRect.contains(x, y)) {
+                        releaseAll();
                         gameMode = !gameMode;
-                        performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
-                        if (!gameMode && stickPointer >= 0) releaseStick();
+                        buzz();
                     }
                 } else if (pointerButton.containsKey(id)) {
                     release(pointerButton.get(id));
                 } else if (id == stickPointer) {
                     releaseStick();
-                    stickX = 0.13f * getWidth();
-                    stickY = 0.70f * getHeight();
-                    knobX = stickX;
-                    knobY = stickY;
                 } else if (id == lookPointer) {
                     lookPointer = -1;
                     if (!gameMode) mouseButton(MOUSE_LEFT, false, x, y);
                 }
+                break;
+            case MotionEvent.ACTION_CANCEL:
+                releaseAll();
+                modePointer = gearPointer = -1;
                 break;
             default:
                 break;
@@ -274,31 +455,270 @@ public class TouchControls extends View {
         return true;
     }
 
+    // ---- settings panel ----
+    private void panelTap(float x, float y) {
+        if (closeRect.contains(x, y) || !panel.contains(x, y)) {
+            panelOpen = false;
+            return;
+        }
+        if (restartNeeded && restartRect.contains(x, y)) {
+            restartApp();
+            return;
+        }
+        for (int i = 0; i < settings.length; i++) {
+            int delta = leftArrows.get(i).contains(x, y) ? -1 : rightArrows.get(i).contains(x, y) ? 1 : 0;
+            if (delta == 0) continue;
+            Setting s = settings[i];
+            s.index = (s.index + delta + s.values.length) % s.values.length;
+            prefs.edit().putInt(s.key, s.index).apply();
+            buzz();
+            if (s.key.equals("fps_limit")) nativeSetFpsLimit(s.value());  // applies right away
+            else if (s.engine) restartNeeded = true;
+            if (s.engine) writeEngineSettings();
+            applyUiSettings();
+            return;
+        }
+    }
+
+    /** Rewrites the engine keys in protore.ini (next to game/), keeping every other line. */
+    private void writeEngineSettings() {
+        File dir = getContext().getExternalFilesDir(null);
+        if (dir == null) return;
+        File ini = new File(dir, "protore.ini");
+        StringBuilder out = new StringBuilder();
+        try {
+            if (ini.exists()) {
+                for (String line : new String(Files.readAllBytes(ini.toPath()), StandardCharsets.UTF_8).split("\n")) {
+                    String k = line.split("=", 2)[0].trim();
+                    boolean ours = false;
+                    for (Setting s : settings) ours |= s.engine && s.key.equals(k);
+                    if (!ours && !line.trim().isEmpty()) out.append(line).append('\n');
+                }
+            }
+            for (Setting s : settings) {
+                if (s.engine) out.append(s.key).append(" = ").append(s.value()).append('\n');
+            }
+            try (FileWriter w = new FileWriter(ini)) {
+                w.write(out.toString());
+            }
+        } catch (Exception ignored) {
+            // settings stay in effect for the UI; the engine keeps its previous values
+        }
+    }
+
+    private void restartApp() {
+        Context ctx = getContext();
+        Intent intent = new Intent(ctx, ProtoActivity.class);
+        PendingIntent pi = PendingIntent.getActivity(ctx, 0, intent,
+                PendingIntent.FLAG_CANCEL_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        AlarmManager am = (AlarmManager) ctx.getSystemService(Context.ALARM_SERVICE);
+        if (am != null) am.set(AlarmManager.RTC, System.currentTimeMillis() + 400, pi);
+        if (ctx instanceof Activity) ((Activity) ctx).finishAffinity();
+        System.exit(0);
+    }
+
     // ---- drawing ----
+    private int alpha(int color, float a) {
+        return Color.argb(Math.round(Color.alpha(color) * a * opacity), Color.red(color), Color.green(color),
+                Color.blue(color));
+    }
+
+    private void hexagon(float cx, float cy, float r) {
+        path.reset();
+        for (int i = 0; i < 6; i++) {
+            double a = Math.PI / 3 * i + Math.PI / 6;
+            float px = cx + (float) Math.cos(a) * r, py = cy + (float) Math.sin(a) * r;
+            if (i == 0) path.moveTo(px, py);
+            else path.lineTo(px, py);
+        }
+        path.close();
+    }
+
+    /** Prototype's bracket corners around a rectangle. */
+    private void brackets(Canvas c, RectF r, float len, Paint p) {
+        c.drawLine(r.left, r.top, r.left + len, r.top, p);
+        c.drawLine(r.left, r.top, r.left, r.top + len, p);
+        c.drawLine(r.right, r.top, r.right - len, r.top, p);
+        c.drawLine(r.right, r.top, r.right, r.top + len, p);
+        c.drawLine(r.left, r.bottom, r.left + len, r.bottom, p);
+        c.drawLine(r.left, r.bottom, r.left, r.bottom - len, p);
+        c.drawLine(r.right, r.bottom, r.right - len, r.bottom, p);
+        c.drawLine(r.right, r.bottom, r.right, r.bottom - len, p);
+    }
+
+    private void drawButton(Canvas c, Button b) {
+        final boolean down = b.pointer >= 0;
+        Bitmap bmp = cached(b.label + (down ? ":1:" : ":0:") + b.r, b.r + 12 * density,
+                (cc, x, y) -> paintButton(cc, b, x, y, down));
+        blitCentered(c, bmp, b.cx, b.cy);
+    }
+
+    private void paintButton(Canvas c, Button b, float bx, float by, boolean down) {
+        hexagon(bx, by, b.r);
+        fill.setStyle(Paint.Style.FILL);
+        fill.setColor(alpha(down ? 0xd0b0180f : 0xa00b0b0b, 1f));
+        c.drawPath(path, fill);
+        glow.setStrokeWidth(4 * density);
+        glow.setColor(alpha(RED, down ? 1f : 0.55f));
+        c.drawPath(path, glow);
+        edge.setStrokeWidth(1.8f * density);
+        edge.setColor(alpha(down ? 0xffffd0c8 : RED, 1f));
+        c.drawPath(path, edge);
+        hexagon(bx, by, b.r * 0.78f);
+        edge.setStrokeWidth(0.8f * density);
+        edge.setColor(alpha(RED_DIM, 0.9f));
+        c.drawPath(path, edge);
+        text.setTextSize(Math.min(14 * density, b.r * 0.42f));
+        text.setColor(alpha(down ? 0xffffffff : 0xffffd6d0, 1f));
+        c.drawText(b.label, bx, by + text.getTextSize() * 0.36f, text);
+    }
+
+    private void drawStick(Canvas c) {
+        blitCentered(c, cached("stick:" + stickR, stickR + 12 * density, this::paintStickBase), stickX, stickY);
+        final boolean held = stickPointer >= 0;
+        blitCentered(c, cached("knob:" + held + stickR, stickR * 0.5f + 4 * density,
+                (cc, x, y) -> paintKnob(cc, x, y, held)), knobX, knobY);
+    }
+
+    private void paintKnob(Canvas c, float x, float y, boolean held) {
+        hexagon(x, y, stickR * 0.42f);
+        fill.setStyle(Paint.Style.FILL);
+        fill.setColor(alpha(held ? 0xe0c01a10 : 0xa0300806, 1f));
+        c.drawPath(path, fill);
+        edge.setStrokeWidth(1.6f * density);
+        edge.setColor(alpha(0xffff6a5e, 1f));
+        c.drawPath(path, edge);
+    }
+
+    private void paintStickBase(Canvas c, float stickX, float stickY) {
+        fill.setStyle(Paint.Style.FILL);
+        fill.setColor(alpha(0x700b0b0b, 1f));
+        c.drawCircle(stickX, stickY, stickR, fill);
+        glow.setStrokeWidth(4 * density);
+        glow.setColor(alpha(RED, 0.5f));
+        c.drawCircle(stickX, stickY, stickR, glow);
+        edge.setStrokeWidth(1.6f * density);
+        edge.setColor(alpha(RED, 0.9f));
+        c.drawCircle(stickX, stickY, stickR, edge);
+        // tick marks every 30 degrees, longer on the four directions
+        for (int i = 0; i < 12; i++) {
+            double a = Math.PI / 6 * i;
+            float in = stickR * (i % 3 == 0 ? 0.80f : 0.88f);
+            c.drawLine(stickX + (float) Math.cos(a) * in, stickY + (float) Math.sin(a) * in,
+                    stickX + (float) Math.cos(a) * stickR, stickY + (float) Math.sin(a) * stickR, edge);
+        }
+    }
+
+    private void drawPill(Canvas c, RectF r, String label, boolean active) {
+        fill.setStyle(Paint.Style.FILL);
+        fill.setColor(alpha(active ? 0xc08a120c : 0xa00b0b0b, 1f));
+        c.drawRect(r, fill);
+        edge.setStrokeWidth(1.5f * density);
+        edge.setColor(alpha(RED, 1f));
+        brackets(c, r, 9 * density, edge);
+        text.setTextSize(14 * density);
+        text.setColor(alpha(0xffffe0dc, 1f));
+        c.drawText(label, r.centerX(), r.centerY() + 5 * density, text);
+    }
+
+    private void drawGear(Canvas c) {
+        float cx = gearRect.centerX(), cy = gearRect.centerY(), r = gearRect.width() * 0.32f;
+        edge.setStrokeWidth(2.2f * density);
+        edge.setColor(alpha(RED, 1f));
+        for (int i = 0; i < 8; i++) {
+            double a = Math.PI / 4 * i;
+            c.drawLine(cx + (float) Math.cos(a) * r, cy + (float) Math.sin(a) * r,
+                    cx + (float) Math.cos(a) * r * 1.35f, cy + (float) Math.sin(a) * r * 1.35f, edge);
+        }
+        c.drawCircle(cx, cy, r, edge);
+        c.drawCircle(cx, cy, r * 0.4f, edge);
+    }
+
+    private void drawPerf(Canvas c) {
+        float fps, ms;
+        int mem;
+        try {
+            fps = nativeFps();
+            ms = nativeFrameMs();
+            mem = nativeMemoryMiB();
+        } catch (UnsatisfiedLinkError e) {
+            return;
+        }
+        String line = String.format("%.0f FPS  %.1f MS  %d MB", fps, ms, mem);
+        text.setTextSize(13 * density);
+        text.setTextAlign(Paint.Align.LEFT);
+        text.setColor(fps >= 50 ? 0xff7dff7a : fps >= 28 ? 0xffffd060 : 0xffff5a4a);
+        c.drawText(line, 124 * density, 39 * density, text);
+        text.setTextAlign(Paint.Align.CENTER);
+    }
+
+    private void drawPanel(Canvas c) {
+        c.drawColor(0x99000000);
+        fill.setStyle(Paint.Style.FILL);
+        fill.setColor(0xf00b0b0b);
+        c.drawRect(panel, fill);
+        edge.setStrokeWidth(3 * density);
+        edge.setColor(0x60e0261e);
+        c.drawRect(panel, edge);
+        edge.setStrokeWidth(2 * density);
+        edge.setColor(RED);
+        brackets(c, panel, 22 * density, edge);
+        float pad = 22 * density;
+        text.setTextSize(20 * density);
+        text.setColor(RED);
+        c.drawText("НАСТРОЙКИ", panel.centerX(), panel.top + 36 * density, text);
+        float rowH = (panel.height() - 120 * density) / settings.length;
+        float top = panel.top + 54 * density;
+        leftArrows.clear();
+        rightArrows.clear();
+        text.setTextSize(Math.min(15 * density, rowH * 0.45f));
+        for (int i = 0; i < settings.length; i++) {
+            Setting s = settings[i];
+            float y = top + rowH * i + rowH / 2;
+            text.setTextAlign(Paint.Align.LEFT);
+            text.setColor(0xffe8d6d4);
+            c.drawText(s.label + (s.engine && !s.key.equals("fps_limit") ? " *" : ""), panel.left + pad,
+                    y + 5 * density, text);
+            float vx = panel.right - pad - 70 * density;
+            RectF l = new RectF(vx - 70 * density, y - rowH / 2, vx - 34 * density, y + rowH / 2);
+            RectF r = new RectF(vx + 34 * density, y - rowH / 2, vx + 70 * density, y + rowH / 2);
+            leftArrows.add(l);
+            rightArrows.add(r);
+            text.setTextAlign(Paint.Align.CENTER);
+            text.setColor(RED);
+            c.drawText("‹", l.centerX(), y + 6 * density, text);
+            c.drawText("›", r.centerX(), y + 6 * density, text);
+            text.setColor(0xffffffff);
+            c.drawText(s.names[s.index], vx, y + 5 * density, text);
+            edge.setStrokeWidth(0.6f * density);
+            edge.setColor(0x40e0261e);
+            c.drawLine(panel.left + pad, y + rowH / 2, panel.right - pad, y + rowH / 2, edge);
+        }
+        text.setTextAlign(Paint.Align.CENTER);
+        float by = panel.bottom - 40 * density;
+        closeRect.set(panel.centerX() + 10 * density, by - 18 * density, panel.centerX() + 150 * density,
+                by + 18 * density);
+        drawPill(c, closeRect, "ЗАКРЫТЬ", false);
+        restartRect.set(panel.centerX() - 150 * density, by - 18 * density, panel.centerX() - 10 * density,
+                by + 18 * density);
+        if (restartNeeded) {
+            drawPill(c, restartRect, "ПЕРЕЗАПУСК", true);
+        } else {
+            text.setTextSize(11 * density);
+            text.setColor(0xff9a8a88);
+            c.drawText("* после перезапуска", restartRect.centerX(), by + 4 * density, text);
+        }
+    }
+
     @Override
     protected void onDraw(Canvas canvas) {
-        // mode switch
-        fill.setColor(gameMode ? 0x66aa2222 : 0x66333333);
-        canvas.drawRoundRect(modeRect, 10 * density, 10 * density, fill);
-        stroke.setColor(0x88ffffff);
-        canvas.drawRoundRect(modeRect, 10 * density, 10 * density, stroke);
-        text.setTextSize(14 * density);
-        canvas.drawText(gameMode ? "Игра" : "Меню", modeRect.centerX(), modeRect.centerY() + 5 * density, text);
-
-        if (gameMode) {
-            fill.setColor(0x33ffffff);
-            canvas.drawCircle(stickX, stickY, stickR, fill);
-            canvas.drawCircle(stickX, stickY, stickR, stroke);
-            fill.setColor(stickPointer >= 0 ? 0x88ffffff : 0x55ffffff);
-            canvas.drawCircle(knobX, knobY, stickR * 0.45f, fill);
-        }
+        if (!controlsHidden()) drawPill(canvas, modeRect, gameMode ? "ИГРА" : "МЕНЮ", gameMode);
+        drawGear(canvas);
+        if (showFps) drawPerf(canvas);
+        if (gameMode && !controlsHidden()) drawStick(canvas);
         for (Button b : buttons) {
-            if (!visible(b)) continue;
-            fill.setColor(b.pointer >= 0 ? 0x88ff5533 : 0x44000000);
-            canvas.drawCircle(b.cx, b.cy, b.r, fill);
-            canvas.drawCircle(b.cx, b.cy, b.r, stroke);
-            text.setTextSize(Math.min(15 * density, b.r * 0.55f));
-            canvas.drawText(b.label, b.cx, b.cy + text.getTextSize() * 0.35f, text);
+            if (visible(b)) drawButton(canvas, b);
         }
+        if (panelOpen) drawPanel(canvas);
     }
 }

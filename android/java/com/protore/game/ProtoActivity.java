@@ -2,6 +2,7 @@ package com.protore.game;
 
 import android.os.Bundle;
 import android.view.ViewGroup;
+import android.view.WindowManager;
 
 import org.libsdl.app.SDLActivity;
 
@@ -15,6 +16,7 @@ public class ProtoActivity extends SDLActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);  // no dimming while playing
         // On-screen controls above SDL's surface; they feed SDL keyboard and mouse input.
         addContentView(new TouchControls(this), new ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));

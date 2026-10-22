@@ -62,6 +62,57 @@ index a47f89c..2d2f927 100644
  
      emitLightTypeDecl();
      emitBaseBufferDecl();
+diff --git a/src/d3d9/d3d9_multithread.h b/src/d3d9/d3d9_multithread.h
+index f91857b..56d4bc0 100644
+--- a/src/d3d9/d3d9_multithread.h
++++ b/src/d3d9/d3d9_multithread.h
+@@ -1,9 +1,19 @@
+ #pragma once
+ 
++#include "../util/thread.h"
++
+ #include "d3d9_include.h"
+ 
+ namespace dxvk {
+ 
++  // Android port: the engine drives the device from several threads; on big.LITTLE phones the spinning waiters
++  // burn whole cores the main thread and the audio mixer need. A sleeping recursive mutex instead.
++#ifdef __ANDROID__
++  using D3D9DeviceMutex = dxvk::recursive_mutex;
++#else
++  using D3D9DeviceMutex = sync::RecursiveSpinlock;
++#endif
++
+   /**
+    * \brief Device lock
+    *
+@@ -19,7 +29,7 @@ namespace dxvk {
+     D3D9DeviceLock()
+       : m_mutex(nullptr) { }
+ 
+-    D3D9DeviceLock(sync::RecursiveSpinlock& mutex)
++    D3D9DeviceLock(D3D9DeviceMutex& mutex)
+       : m_mutex(&mutex) {
+       mutex.lock();
+     }
+@@ -45,7 +55,7 @@ namespace dxvk {
+ 
+   private:
+ 
+-    sync::RecursiveSpinlock* m_mutex;
++    D3D9DeviceMutex* m_mutex;
+ 
+   };
+ 
+@@ -70,7 +80,7 @@ namespace dxvk {
+ 
+     BOOL            m_protected;
+ 
+-    sync::RecursiveSpinlock m_mutex;
++    D3D9DeviceMutex m_mutex;
+ 
+   };
+ 
 diff --git a/src/dxso/dxso_compiler.cpp b/src/dxso/dxso_compiler.cpp
 index d7cdc67..29299ee 100644
 --- a/src/dxso/dxso_compiler.cpp

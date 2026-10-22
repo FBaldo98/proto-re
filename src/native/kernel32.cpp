@@ -3,6 +3,7 @@
 #include <fcntl.h>
 #include <fnmatch.h>
 #include <sched.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <sys/time.h>
@@ -204,6 +205,7 @@ struct Thread : KObject {
     bool suspended = false;
     uint32_t exit_code = 259;  // STILL_ACTIVE
     uint32_t id = 0;
+    int host_tid = 0;
 };
 
 uint32_t CurrentTid() { return CurrentThread()->id; }
@@ -519,6 +521,7 @@ K(CreateThread) {
     std::atomic<uint32_t> id{0};
     std::thread([t, stack, start, param, &id]() {
         GuestThread* g = AttachThread(stack);
+        t->host_tid = int(gettid());
         t->id = g->id;
         id.store(g->id);
         {
@@ -550,7 +553,26 @@ K(SuspendThread) {
     Log("SuspendThread(%08x) ignored", Arg(c, 0));
     Return(c, 0, 1);
 }
-K(SetThreadPriority) { Return(c, 1, 2); }
+// Windows priorities -> nice values: the engine raises its audio mixer and render threads; on a phone they compete
+// with half a dozen busy workers, so the hint matters.
+K(SetThreadPriority) {
+    uint32_t h = Arg(c, 0);
+    int prio = int32_t(Arg(c, 1));
+    int tid = 0;
+    if (h == kCurrentThread) {
+        tid = int(gettid());
+    } else {
+        std::lock_guard<std::mutex> lock(g_kernel_mutex);
+        KObject* o = HandleObject(h);
+        if (o && o->type == KType::Thread) tid = static_cast<Thread*>(o)->host_tid;
+    }
+    int nice = prio >= 15 ? -10 : prio <= -15 ? 10 : -2 * prio;  // TIME_CRITICAL / IDLE / -2..2
+    if (tid) {
+        int r = setpriority(PRIO_PROCESS, id_t(tid), nice);
+        Log("SetThreadPriority(%d) -> nice %d on tid %d%s", prio, nice, tid, r == 0 ? "" : " (not permitted)");
+    }
+    Return(c, 1, 2);
+}
 K(SetThreadAffinityMask) { Return(c, 1, 2); }
 K(GetProcessAffinityMask) {
     W32(Arg(c, 1), 0xf);

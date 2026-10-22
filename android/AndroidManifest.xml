@@ -17,6 +17,8 @@
 
     <application
         android:label="Prototype"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher"
         android:hasCode="true"
         android:extractNativeLibs="true"
         android:largeHeap="true"
@@ -24,6 +26,9 @@
         android:appCategory="game"
         android:isGame="true"
         android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
+
+        <!-- profiling with simpleperf without root -->
+        <profileable android:shell="true" />
 
         <activity
             android:name="com.protore.game.ProtoActivity"

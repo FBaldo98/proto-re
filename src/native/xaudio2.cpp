@@ -189,7 +189,15 @@ M(GetDeviceDetails) {
     Return(c, hr, 3);
 }
 M(Initialize) {
-    uint32_t hr = FAudio_Initialize(Obj(Arg(c, 0))->audio, Arg(c, 1), FAUDIO_DEFAULT_PROCESSOR);
+    // A 21.33 ms mixing quantum instead of 10 ms: twice the slack for the engine's mixer thread before an underrun
+    // (audible as stutter on phones), for a few ms more latency. Setting audio_quantum_1024.
+#ifdef __ANDROID__
+    const bool long_quantum = SettingInt("audio_quantum_1024", 1) != 0;
+#else
+    const bool long_quantum = SettingInt("audio_quantum_1024", 0) != 0;
+#endif
+    uint32_t flags = Arg(c, 1) | (long_quantum ? FAUDIO_1024_QUANTUM : 0);
+    uint32_t hr = FAudio_Initialize(Obj(Arg(c, 0))->audio, flags, FAUDIO_DEFAULT_PROCESSOR);
     Log("xaudio2: Initialize(flags %x) -> %x", Arg(c, 1), hr);
     Return(c, hr, 3);
 }
