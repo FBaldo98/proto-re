@@ -14,6 +14,7 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 
@@ -126,10 +127,59 @@ void ReturnFStd(Ctx* c, float v, int args) {
 
 void ForgetResource(void* host);  // lock shadows and texture adaptation state of a released object
 
+// Vertex and index buffers whose last reference the engine dropped live on for a few frames: the engine sometimes
+// still locks a buffer right after releasing it, which on Windows works (the object outlives its last public
+// reference while the device uses it) but would hit the bridge's null vtable here. The bridge keeps the engine's
+// last reference and drops it at a later Present (or before Reset, which needs default-pool buffers gone).
+struct Grave {
+    uint32_t guest;
+    IUnknown* host;
+    uint32_t frame;
+};
+std::vector<Grave> g_graves;
+uint32_t g_present_count = 0;
+constexpr uint32_t kGraveFrames = 3;
+
+ULONG RefCount(IUnknown* p) {
+    p->AddRef();
+    return p->Release();
+}
+
+void DrainGraves(bool all) {
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    size_t kept = 0;
+    for (const Grave& gr : g_graves) {
+        if (!all && g_present_count - gr.frame < kGraveFrames) {
+            g_graves[kept++] = gr;
+            continue;
+        }
+        if (RefCount(gr.host) == 1) {
+            ForgetResource(gr.host);
+            Forget(gr.guest);
+        }
+        gr.host->Release();  // revived by the engine meanwhile: its own references keep it
+    }
+    g_graves.resize(kept);
+}
+
 template <typename T>
 void ReleaseImpl(Ctx* c) {
     uint32_t g = Arg(c, 0);
     T* host = Host<T>(g);
+    if constexpr (std::is_same_v<T, IDirect3DVertexBuffer9> || std::is_same_v<T, IDirect3DIndexBuffer9>) {
+        std::lock_guard<std::recursive_mutex> lock(g_mutex);
+        for (const Grave& gr : g_graves) {
+            if (gr.host == host && RefCount(host) == 1) {  // released again while already pending
+                Return(c, 0, 1);
+                return;
+            }
+        }
+        if (RefCount(host) == 1) {
+            g_graves.push_back({g, host, g_present_count});
+            Return(c, 0, 1);
+            return;
+        }
+    }
     ULONG r = host->Release();
     if (r == 0) {
         ForgetResource(host);
@@ -660,6 +710,7 @@ M(IDirect3DDevice9, CreateAdditionalSwapChain) {
 }
 M(IDirect3DDevice9, Reset) {
     D3DPRESENT_PARAMETERS pp = ToHost(Arg(c, 1));
+    DrainGraves(true);
     HRESULT hr = Host<IDirect3DDevice9>(Arg(c, 0))->Reset(&pp);
     Log("Reset %ux%u -> %08x", pp.BackBufferWidth, pp.BackBufferHeight, uint32_t(hr));
     if (SUCCEEDED(hr) && OverrideModes()) SetClientSize(int(pp.BackBufferWidth), int(pp.BackBufferHeight));
@@ -718,6 +769,8 @@ void MaybeScreenshot(IDirect3DDevice9* dev) {
 }
 
 M(IDirect3DDevice9, Present) {
+    ++g_present_count;
+    if (!g_graves.empty()) DrainGraves(false);
     MaybeScreenshot(Host<IDirect3DDevice9>(Arg(c, 0)));
     HRESULT hr = Host<IDirect3DDevice9>(Arg(c, 0))->Present(Ptr<RECT>(Arg(c, 1)), Ptr<RECT>(Arg(c, 2)), nullptr,
                                                             nullptr);

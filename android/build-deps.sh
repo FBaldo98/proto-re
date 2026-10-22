@@ -32,8 +32,11 @@ fetch FAudio https://github.com/FNA-XNA/FAudio.git $FAUDIO_TAG
 fetch dxvk https://github.com/doitsujin/dxvk.git $DXVK_TAG
 
 # Android patches (android/patches/<project>-*.patch), applied once.
-for p in "$(dirname "$0")"/patches/dxvk-*.patch; do
-    git -C "$SRC/dxvk" apply --check "$p" 2>/dev/null && git -C "$SRC/dxvk" apply "$p" && echo "applied $(basename "$p")"
+for proj in SDL2 FAudio dxvk; do
+    for p in "$(dirname "$0")"/patches/"${proj,,}"-*.patch; do
+        [ -e "$p" ] || continue
+        git -C "$SRC/$proj" apply --check "$p" 2>/dev/null && git -C "$SRC/$proj" apply "$p" && echo "applied $(basename "$p")"
+    done
 done
 
 CMAKE_ANDROID=(-G Ninja -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" -DANDROID_ABI="$ABI"

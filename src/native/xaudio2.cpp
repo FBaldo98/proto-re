@@ -12,6 +12,7 @@
 // Guest objects are 16-byte blocks: [0] guest vtable (import thunks), [4] index into g_objects.
 #include <FAudio.h>
 
+#include <chrono>
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -86,16 +87,62 @@ void EnsureGuestThread() {
 }
 
 uint32_t Method(uint32_t obj, int index) { return R32(R32(obj) + 4 * uint32_t(index)); }
+
+// Diagnostics (setting audio_stats): per 5 s, the mixing passes, the longest gap between passes, the time spent
+// in guest callbacks (on FAudio's mixing thread, so it delays the device), and the passes where the engine's
+// source voice was short of data (BytesRequired > 0: audible as a dropout).
+struct AudioStats {
+    using Clock = std::chrono::steady_clock;
+    bool on = SettingInt("audio_stats", 0) != 0;
+    Clock::time_point window = Clock::now(), last_pass{};
+    uint32_t passes = 0, starved = 0, submits = 0;
+    double max_gap_ms = 0, guest_ms = 0, max_guest_ms = 0;
+};
+AudioStats& Stats() {
+    static AudioStats s;
+    return s;
+}
+struct GuestTimer {
+    AudioStats::Clock::time_point t0 = AudioStats::Clock::now();
+    ~GuestTimer() {
+        AudioStats& s = Stats();
+        if (!s.on) return;
+        double ms = std::chrono::duration<double, std::milli>(AudioStats::Clock::now() - t0).count();
+        s.guest_ms += ms;
+        if (ms > s.max_guest_ms) s.max_guest_ms = ms;
+    }
+};
+void StatsPass() {
+    AudioStats& s = Stats();
+    if (!s.on) return;
+    auto now = AudioStats::Clock::now();
+    if (s.passes++ && s.last_pass.time_since_epoch().count()) {
+        double gap = std::chrono::duration<double, std::milli>(now - s.last_pass).count();
+        if (gap > s.max_gap_ms) s.max_gap_ms = gap;
+    }
+    s.last_pass = now;
+    if (now - s.window >= std::chrono::seconds(5)) {
+        Log("audio: %u passes, max gap %.1f ms, guest %.1f ms (max %.2f), starved %u, submits %u", s.passes,
+            s.max_gap_ms, s.guest_ms, s.max_guest_ms, s.starved, s.submits);
+        s.window = now;
+        s.passes = s.starved = s.submits = 0;
+        s.max_gap_ms = s.guest_ms = s.max_guest_ms = 0;
+    }
+}
 uint32_t GuestPtr(void* p) { return uint32_t(reinterpret_cast<uintptr_t>(p)); }
 
 VoiceCallback* Vcb(FAudioVoiceCallback* cb) { return reinterpret_cast<VoiceCallback*>(cb); }
 
 void OnPassStart(FAudioVoiceCallback* cb, uint32_t bytes) {
     EnsureGuestThread();
+    StatsPass();
+    if (bytes) ++Stats().starved;
+    GuestTimer t;
     GuestCall(Method(Vcb(cb)->guest, 0), {Vcb(cb)->guest, bytes});
 }
 void OnPassEnd(FAudioVoiceCallback* cb) {
     EnsureGuestThread();
+    GuestTimer t;
     GuestCall(Method(Vcb(cb)->guest, 1), {Vcb(cb)->guest});
 }
 void OnStreamEnd(FAudioVoiceCallback* cb) {
@@ -104,10 +151,12 @@ void OnStreamEnd(FAudioVoiceCallback* cb) {
 }
 void OnBufferStart(FAudioVoiceCallback* cb, void* ctx) {
     EnsureGuestThread();
+    GuestTimer t;
     GuestCall(Method(Vcb(cb)->guest, 3), {Vcb(cb)->guest, GuestPtr(ctx)});
 }
 void OnBufferEnd(FAudioVoiceCallback* cb, void* ctx) {
     EnsureGuestThread();
+    GuestTimer t;
     GuestCall(Method(Vcb(cb)->guest, 4), {Vcb(cb)->guest, GuestPtr(ctx)});
 }
 void OnLoopEnd(FAudioVoiceCallback* cb, void* ctx) {
@@ -123,10 +172,12 @@ EngineCallback* Ecb(FAudioEngineCallback* cb) { return reinterpret_cast<EngineCa
 
 void OnEnginePassStart(FAudioEngineCallback* cb) {
     EnsureGuestThread();
+    GuestTimer t;
     GuestCall(Method(Ecb(cb)->guest, 0), {Ecb(cb)->guest});
 }
 void OnEnginePassEnd(FAudioEngineCallback* cb) {
     EnsureGuestThread();
+    GuestTimer t;
     GuestCall(Method(Ecb(cb)->guest, 1), {Ecb(cb)->guest});
 }
 void OnCriticalError(FAudioEngineCallback* cb, uint32_t error) {
@@ -366,6 +417,7 @@ M(SubmitSourceBuffer) {
         wma.PacketCount = R32(w + 4);
         pwma = &wma;
     }
+    ++Stats().submits;
     Return(c, FAudioSourceVoice_SubmitSourceBuffer(VoiceOf(Arg(c, 0)), &buf, pwma), 3);
 }
 M(FlushSourceBuffers) { Return(c, FAudioSourceVoice_FlushSourceBuffers(VoiceOf(Arg(c, 0))), 1); }
