@@ -354,11 +354,18 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
     }
 
     private void mouseButton(int bit, boolean down, float x, float y) {
-        lastMouseX = x;
-        lastMouseY = y;
         if (down) mouseState |= bit;
         else mouseState &= ~bit;
-        SDLActivity.onNativeMouse(mouseState, down ? MotionEvent.ACTION_DOWN : MotionEvent.ACTION_UP, x, y, false);
+        int action = down ? MotionEvent.ACTION_DOWN : MotionEvent.ACTION_UP;
+        if (gameMode) {
+            // SDL sends a motion with every button: in game mode a zero relative one, as an absolute position would
+            // jerk the camera (the cursor is wherever the relative camera drags left it)
+            SDLActivity.onNativeMouse(mouseState, action, 0, 0, true);
+            return;
+        }
+        lastMouseX = x;
+        lastMouseY = y;
+        SDLActivity.onNativeMouse(mouseState, action, x, y, false);
     }
 
     private void mouseMoveTo(float x, float y) {
@@ -367,8 +374,15 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
         SDLActivity.onNativeMouse(mouseState, MotionEvent.ACTION_MOVE, x, y, false);
     }
 
+    private float moveRestX, moveRestY;  // SDL takes whole pixels: carry the fractions
+
     private void mouseMoveBy(float dx, float dy) {
-        SDLActivity.onNativeMouse(mouseState, MotionEvent.ACTION_MOVE, dx, dy, true);
+        dx += moveRestX;
+        dy += moveRestY;
+        int ix = (int) dx, iy = (int) dy;
+        moveRestX = dx - ix;
+        moveRestY = dy - iy;
+        if (ix != 0 || iy != 0) SDLActivity.onNativeMouse(mouseState, MotionEvent.ACTION_MOVE, ix, iy, true);
     }
 
     private void buzz() {
