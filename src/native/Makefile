@@ -26,7 +26,11 @@ TOOLCHAIN := $(NDK)/toolchains/llvm/prebuilt/linux-x86_64/bin
 CXX := $(TOOLCHAIN)/$(TRIPLE)-clang++
 CC := $(TOOLCHAIN)/$(TRIPLE)-clang
 OUT ?= ../../build/android/$(ABI)
-TARGET_FLAGS := -fPIC $(if $(filter arm64-v8a,$(ABI)),-moutline-atomics)
+# arm64: ARMv8.2 + RCpc (Cortex-A55/A76/X1 and newer, i.e. phones from 2019 on): LDAPR for the TSO acquire loads,
+# inline LSE atomics. ARM_ARCH=armv8-a builds for older cores (Cortex-A53/A73), with outline atomics.
+ARM_ARCH ?= armv8.2-a+rcpc
+TARGET_FLAGS := -fPIC $(if $(filter arm64-v8a,$(ABI)),-march=$(ARM_ARCH) -mtune=cortex-a76 \
+                $(if $(filter armv8-a,$(ARM_ARCH)),-moutline-atomics))
 RECOMP_OPT := -O2
 # arm64 is weakly ordered: guest memory accesses get x86-like ordering (runtime.h RECOMP_TSO); tso=0 to measure.
 TSO ?= 1

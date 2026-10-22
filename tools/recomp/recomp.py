@@ -26,6 +26,7 @@ DLL = os.environ.get("PROTORE_ENGINE",
 BASE = 0x10000000  # the DLL's preferred base; --base rebases everything (rebase())
 ORIG_BASE = 0x10000000
 LOCALIZE = True  # general registers in C locals (--no-localize to compare)
+DIRTY_TRACKING = True  # spill only changed state (--no-dirty to compare)
 
 REG32 = {"eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi"}
 REG16 = {"ax": "eax", "cx": "ecx", "dx": "edx", "bx": "ebx", "sp": "esp", "bp": "ebp", "si": "esi", "di": "edi"}
@@ -214,6 +215,116 @@ def inline_helper(kind, nxt):
                 "c->eax = (uint32_t)v; c->edx = (uint32_t)(v >> 32); }")
     raise ValueError(kind)
 
+
+# ---- spill only what changed (see apply_spills) ----
+_GPRS = ["eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi"]
+_GPR_WRITE_RE = re.compile(r"\br_(eax|ecx|edx|ebx|esp|ebp|esi|edi)\s*(?:=(?!=)|\+=|-=|\*=|/=|%=|&=|\|=|\^=|<<=|>>=|\+\+|--)"
+                           r"|&r_(eax|ecx|edx|ebx|esp|ebp|esi|edi)\b")
+_XMM_WRITE_RE = re.compile(r"&r_xmm(\d)|\br_xmm(\d)(?:\.\w+(?:\[[^\]]*\])?)?\s*(?:=(?!=)|\+=|-=|\*=|/=|&=|\|=|\^=)")
+_X87_WRITE_RE = re.compile(r"X87PushL|X87PopL|\br_top\s*=(?!=)|&r_top|\br_st\[[^\]]*\]\s*=(?!=)|X87L\([^)]*\)\s*=(?!=)")
+
+
+def _writes(text, xmms, x87):
+    w = set()
+    for m in _GPR_WRITE_RE.finditer(text):
+        w.add(m.group(1) or m.group(2))
+    for m in _XMM_WRITE_RE.finditer(text):
+        n = m.group(1) or m.group(2)
+        if n in xmms:
+            w.add("xmm" + n)
+    if x87 and _X87_WRITE_RE.search(text):
+        w.add("x87")
+    return w
+
+
+def _spill_expr(dirty, xmms, x87):
+    parts = [f"c->{r} = r_{r}" for r in _GPRS if r in dirty]
+    parts += [f"c->xmm[{n}] = r_xmm{n}" for n in xmms if "xmm" + n in dirty]
+    if x87 and "x87" in dirty:
+        parts += ["memcpy(c->st, r_st, sizeof r_st)", "c->st_top = r_top"]
+    return "(" + ", ".join(parts) + ")" if parts else "((void)0)"
+
+
+def _reload_expr(xmms, x87):
+    # Everything: loads the function never uses again are dead and dropped by the C compiler. Flags are not
+    # reloaded: they are undefined after a call.
+    parts = [f"r_{r} = c->{r}" for r in _GPRS]
+    parts += [f"r_xmm{n} = c->xmm[{n}]" for n in xmms]
+    if x87:
+        parts += ["memcpy(r_st, c->st, sizeof r_st)", "r_top = c->st_top", "r_cw = c->fpu_cw"]
+    return "(" + ", ".join(parts) + ")"
+
+
+def apply_spills(lines, xmms, x87, dirty_tracking=True):
+    """Replaces RSPILL/RRELOAD in a localized body. With dirty tracking, a spill stores only the state changed
+    since the last point where locals and context agreed (function entry, after a reload). The dirty set at a label
+    is the union over every path reaching it (gotos and fall-through), iterated to a fixed point for loops. Flags
+    are never spilled: x86 code does not keep them across calls or returns, and inside the function they live in rf."""
+    everything = set(_GPRS) | {"xmm" + n for n in xmms} | ({"x87"} if x87 else set())
+    if not dirty_tracking:
+        return [_rewrite(l, xmms, x87, lambda pos: everything) if ("RSPILL" in l or "RRELOAD" in l) else l
+                for l in lines]
+    label_in = {}
+    for _ in range(12):
+        changed = False
+        result = []
+        dirty = set()
+        for line in lines:
+            if line.startswith("L_"):
+                name = line[:line.index(":")]
+                dirty = dirty | label_in.get(name, set())
+                result.append(line)
+                continue
+            start = set(dirty)
+            # gotos leaving this line: the state at the goto
+            for m in re.finditer(r"goto (L_[0-9a-f]+);", line):
+                d = start | _writes(line[:m.start()], xmms, x87)
+                last = line.rfind("RRELOAD", 0, m.start())
+                if last >= 0 and _unconditional(line[:m.start()]):
+                    d = _writes(line[last:m.start()], xmms, x87)
+                old = label_in.get(m.group(1), set())
+                if not d <= old:
+                    label_in[m.group(1)] = old | d
+                    changed = True
+            if "RSPILL" in line or "RRELOAD" in line:
+                result.append(_rewrite(line, xmms, x87, lambda pos, l=line, st=start: st | _writes(l[:pos], xmms, x87)))
+                last = line.rfind("RRELOAD")
+                dirty = _writes(line[last:], xmms, x87) if last >= 0 and _unconditional(line) else \
+                    start | _writes(line, xmms, x87)
+            else:
+                result.append(line)
+                dirty = start | _writes(line, xmms, x87)
+            # nothing falls through an unconditional exit
+            tail = line.split("/*")[0].rstrip()
+            if tail.endswith("return; }") and not tail.lstrip().startswith("if ") or \
+                    re.match(r"^\s*goto L_[0-9a-f]+;\s*$", tail):
+                dirty = set()
+        if not changed:
+            return result
+    return [_rewrite(l, xmms, x87, lambda pos: everything) if ("RSPILL" in l or "RRELOAD" in l) else l
+            for l in lines]
+
+
+def _unconditional(text):
+    """True when every path through `text` passes its last reload: a plain call statement, or the direct/dispatch
+    call pair (both branches reload). Conditional exits and setjmp keep the state of paths that did not reload."""
+    stripped = text.lstrip()
+    if "setjmp" in text or stripped.startswith("if ("):
+        return False
+    if "else" not in text:
+        return True
+    return "if (RecompDirect(" in text and text.count("RRELOAD") == 2
+
+
+def _rewrite(line, xmms, x87, dirty_at):
+    pieces, pos = [], 0
+    for m in re.finditer(r"RSPILL|RRELOAD", line):
+        pieces.append(line[pos:m.start()])
+        pieces.append(_spill_expr(dirty_at(m.start()), xmms, x87) if m.group(0) == "RSPILL"
+                      else _reload_expr(xmms, x87))
+        pos = m.end()
+    pieces.append(line[pos:])
+    return "".join(pieces)
 
 # ---- register localization (see RLOCALS in runtime.h) ----
 _REG_RE = re.compile(r"c->(eax|ecx|edx|ebx|esp|ebp|esi|edi)\b")
@@ -1255,10 +1366,9 @@ class FunctionCompiler:
             decl, spill, reload, x87 = vector_state("\n".join(out[2:]))
             out = out[:2] + ["    " + d for d in decl] + \
                 [localize(l, x87) if not l.startswith("L_") else l for l in out[2:]]
-            if spill:
-                sp, rl = "(RSPILL, " + ", ".join(spill) + ")", "(RRELOAD, " + ", ".join(reload) + ")"
-                out = out[:1] + [l.replace("RSPILL", sp).replace("RRELOAD", rl) if "RSPILL" in l or "RRELOAD" in l
-                                 else l for l in out[1:]]
+            xmms = sorted(set(_XMM_RE.findall("\n".join(out))))  # (already renamed: read the declarations)
+            xmms = [d.split("r_xmm")[1].split(" ")[0] for d in decl if d.startswith("XmmValue r_xmm")]
+            out = out[:1] + apply_spills(out[1:], xmms, x87, DIRTY_TRACKING)
         out.append("}")
         # Prototypes last: tail jumps added while assembling the body are direct calls too.
         protos = [f"void f_{t:08x}(Ctx* c);" for t in sorted(self.direct_calls - {self.va})]
@@ -1374,9 +1484,11 @@ def main():
     ap.add_argument("--base", type=lambda v: int(v, 0), default=ORIG_BASE,
                     help="engine load address (native host: 0x58000000)")
     ap.add_argument("--no-localize", action="store_true", help="keep general registers in the context")
+    ap.add_argument("--no-dirty", action="store_true", help="spill all localized state at every call")
     args = ap.parse_args()
-    global LOCALIZE
+    global LOCALIZE, DIRTY_TRACKING
     LOCALIZE = not args.no_localize
+    DIRTY_TRACKING = not args.no_dirty
     rebase(args.base)
     sizes = load_functions()
     if args.functions == "all":
