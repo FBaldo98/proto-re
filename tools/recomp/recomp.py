@@ -34,6 +34,10 @@ REG8H = {"ah": "eax", "ch": "ecx", "dh": "edx", "bh": "ebx"}
 # User-mode selectors of 32-bit Windows; only ever read by the engine (stack/segment probes).
 # Calls with a special implementation in recompiled code (MSVCR80 setjmp/longjmp: thunk and IAT slot addresses).
 SETJMP_TARGETS = {0x10a88a30}
+# Statically linked MSVC helpers emitted inline at their call sites (no call, no register spill): float->int64
+# truncation, stack probes (alloca/large frames) and 64-bit integer helpers.
+INLINE_HELPERS = {0x10a88426: "ftol2", 0x10a883b0: "chkstk", 0x10a889e0: "chkstk16", 0x10a889f6: "chkstk8",
+                  0x10a88370: "allmul", 0x10a884b0: "allshl", 0x10ba2b50: "aullshr"}
 SETJMP_IAT = {0x11331fc4}
 LONGJMP_IAT = {0x11331fbc}
 SEGMENT_SELECTORS = {"cs": 0x1b, "ds": 0x23, "es": 0x23, "ss": 0x23, "fs": 0x3b, "gs": 0x0}
@@ -114,9 +118,10 @@ def rebase(new_base):
     """Generates code for the engine loaded at `new_base` instead of its preferred base (the native host on Android,
     where ART owns 0x10000000): every address taken from the analysis moves by the same delta, and the image bytes
     get the DLL's base relocations applied (relocate_pe), exactly as the loader does at run time."""
-    global BASE, SETJMP_TARGETS, SETJMP_IAT, LONGJMP_IAT
+    global BASE, SETJMP_TARGETS, SETJMP_IAT, LONGJMP_IAT, INLINE_HELPERS
     delta = new_base - ORIG_BASE
     BASE = new_base
+    INLINE_HELPERS = {a + delta: k for a, k in INLINE_HELPERS.items()}
     SETJMP_TARGETS = {a + delta for a in SETJMP_TARGETS}
     SETJMP_IAT = {a + delta for a in SETJMP_IAT}
     LONGJMP_IAT = {a + delta for a in LONGJMP_IAT}
@@ -183,6 +188,33 @@ def load_functions():
     return extents
 
 
+
+def inline_helper(kind, nxt):
+    """C for an inlined MSVC helper, written as if the call had run (registers, stack pointer, x87 stack)."""
+    probe = ("{ uint32_t n = c->eax, e = c->esp; uint32_t top = (e - 4u >= n) ? e - 4u - n : 0u; "
+             f"c->esp = top + 4u; c->eax = 0x{nxt:08x}u; }}")
+    if kind == "ftol2":
+        return ("{ double v = X87(c, 0); X87Pop(c); int64_t r = (v != v || v >= 9223372036854775808.0 || "
+                "v < -9223372036854775808.0) ? INT64_MIN : (int64_t)v; "
+                "c->eax = (uint32_t)r; c->edx = (uint32_t)((uint64_t)r >> 32); }")
+    if kind == "chkstk":
+        return probe
+    if kind in ("chkstk16", "chkstk8"):
+        mask = 15 if kind == "chkstk16" else 7
+        return (f"{{ uint32_t n0 = c->eax, m = (c->esp - n0) & {mask}u, n1 = n0 + m; c->eax = n1 < n0 ? 0xffffffffu : n1; "
+                f"}} {probe}")
+    if kind == "allmul":
+        return ("{ uint32_t e = c->esp; uint64_t a = R32(e) | ((uint64_t)R32(e + 4u) << 32), "
+                "b = R32(e + 8u) | ((uint64_t)R32(e + 12u) << 32), r = a * b; "
+                "c->eax = (uint32_t)r; c->edx = (uint32_t)(r >> 32); c->ecx = R32(e + 8u); c->esp = e + 16u; }")
+    if kind in ("allshl", "aullshr"):
+        op = "<<" if kind == "allshl" else ">>"
+        return ("{ uint32_t s = c->ecx & 0xffu; uint64_t v = ((uint64_t)c->edx << 32) | c->eax; "
+                f"if (s >= 64u) v = 0; else {{ v {op}= s; if (s >= 32u) c->ecx = (c->ecx & ~0xffu) | (s & 0x1fu); }} "
+                "c->eax = (uint32_t)v; c->edx = (uint32_t)(v >> 32); }")
+    raise ValueError(kind)
+
+
 # ---- register localization (see RLOCALS in runtime.h) ----
 _REG_RE = re.compile(r"c->(eax|ecx|edx|ebx|esp|ebp|esi|edi)\b")
 _FLAG_RE = re.compile(r"c->(cf|zf|sf|of|pf|df|af)\b")
@@ -216,7 +248,27 @@ def _wrap_calls(line):
     return "".join(out)
 
 
-def localize(line):
+_XMM_RE = re.compile(r"c->xmm\[(\d)\]")
+_X87_CALLS = [("X87(c, ", "X87L("), ("X87Push(c, ", "X87PushL(r_st, &r_top, "), ("X87Pop(c)", "X87PopL(&r_top)"),
+              ("X87StatusWord(c)", "X87StatusWordL(c, r_top)"), ("c->st_top", "r_top"), ("c->st[", "r_st[")]
+
+
+def vector_state(body):
+    """XMM registers and x87 use of a function body: they get local copies too, spilled and reloaded with the
+    general registers. Returns (declarations, spill expressions, reload expressions)."""
+    xmms = sorted(set(_XMM_RE.findall(body)))
+    x87 = any(k in body for k in ("X87(c, ", "X87Push(c, ", "X87Pop(c)", "X87StatusWord(c)", "c->st_top", "c->st["))
+    decl = [f"XmmValue r_xmm{n} = c->xmm[{n}];" for n in xmms]
+    spill = [f"c->xmm[{n}] = r_xmm{n}" for n in xmms]
+    reload = [f"r_xmm{n} = c->xmm[{n}]" for n in xmms]
+    if x87:
+        decl.append("double r_st[8]; memcpy(r_st, c->st, sizeof r_st); uint32_t r_top = c->st_top;")
+        spill += ["memcpy(c->st, r_st, sizeof r_st)", "c->st_top = r_top"]
+        reload += ["memcpy(r_st, c->st, sizeof r_st)", "r_top = c->st_top"]
+    return decl, spill, reload, x87
+
+
+def localize(line, x87=False):
     if "setjmp(" in line:
         # setjmp: the context must be current when the jmp_buf is prepared; after a longjmp the locals are stale and
         # RecompSetjmpResume has restored the context, so reload from it.
@@ -226,6 +278,10 @@ def localize(line):
         return line
     line = _REG_RE.sub(r"r_\1", line)
     line = _FLAG_RE.sub(r"rf.\1", line)
+    line = _XMM_RE.sub(r"r_xmm\1", line)
+    if x87:
+        for old, new in _X87_CALLS:
+            line = line.replace(old, new)
     for old, new in _FLAG_CALLS:
         line = line.replace(old, new)
     line = line.replace("Push32(c, ", "LPush32(&r_esp, ").replace("Pop32(c)", "LPop32(&r_esp)")
@@ -326,6 +382,18 @@ class FunctionCompiler:
         for i in self.md.disasm(self.pe.get_data(addr - BASE, 16), addr, count=1):
             return i
         return None
+
+    def follow_jmp_thunks(self, t):
+        """Final target of a chain of `jmp rel32` thunks (incremental-linking table)."""
+        for _ in range(4):
+            try:
+                b = self.pe.get_data(t - BASE, 5)
+            except Exception:
+                return t
+            if b[0] != 0xE9:
+                return t
+            t = (t + 5 + int.from_bytes(b[1:5], "little", signed=True)) & 0xffffffff
+        return t
 
     def jump_table(self, ins, recent=()):
         """Targets of `jmp dword ptr [reg*4 + table]`.
@@ -622,6 +690,9 @@ class FunctionCompiler:
                 return "RecompLongjmp(c, R32(c->esp), R32(c->esp + 4u));"
             if ops[0].type == X.X86_OP_IMM:
                 t = ops[0].imm & 0xffffffff
+                final = self.follow_jmp_thunks(t)
+                if final in INLINE_HELPERS:
+                    return inline_helper(INLINE_HELPERS[final], nxt)
                 if t in self.known:
                     self.direct_calls.add(t)
                     return (f"Push32(c, 0x{nxt:08x}u); if (RecompDirect(0x{t:08x}u)) f_{t:08x}(c); "
@@ -1175,7 +1246,13 @@ class FunctionCompiler:
         if not self.ins:
             out.append(f'    RecompUnimplemented(c, 0x{self.va:08x}u, "no decodable instruction"); return;')
         if LOCALIZE:
-            out = out[:2] + [localize(l) if not l.startswith("L_") else l for l in out[2:]]
+            decl, spill, reload, x87 = vector_state("\n".join(out[2:]))
+            out = out[:2] + ["    " + d for d in decl] + \
+                [localize(l, x87) if not l.startswith("L_") else l for l in out[2:]]
+            if spill:
+                sp, rl = "(RSPILL, " + ", ".join(spill) + ")", "(RRELOAD, " + ", ".join(reload) + ")"
+                out = out[:1] + [l.replace("RSPILL", sp).replace("RRELOAD", rl) if "RSPILL" in l or "RRELOAD" in l
+                                 else l for l in out[1:]]
         out.append("}")
         # Prototypes last: tail jumps added while assembling the body are direct calls too.
         protos = [f"void f_{t:08x}(Ctx* c);" for t in sorted(self.direct_calls - {self.va})]

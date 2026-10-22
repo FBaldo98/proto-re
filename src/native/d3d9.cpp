@@ -8,6 +8,8 @@
 #include <SDL2/SDL.h>
 #include <d3d9.h>
 
+#include <unistd.h>
+
 #include <cstring>
 #include <map>
 #include <mutex>
@@ -671,9 +673,12 @@ void MaybeScreenshot(IDirect3DDevice9* dev) {
     static const char* spec = spec_setting.empty() ? nullptr : spec_setting.c_str();
     static uint32_t frame = 0;
     ++frame;
-    if (!spec) return;
-    bool want = false;
-    for (const char* p = spec; *p;) {
+    // On demand: a file named shot_now in the working directory (adb shell touch ...) asks for one frame.
+    bool now = (frame & 15) == 0 && access("shot_now", F_OK) == 0;
+    if (now) unlink("shot_now");
+    if (!spec && !now) return;
+    bool want = now;
+    for (const char* p = spec ? spec : ""; *p;) {
         char* end;
         if (strtoul(p, &end, 10) == frame) want = true;
         p = *end ? end + 1 : end;
@@ -688,7 +693,7 @@ void MaybeScreenshot(IDirect3DDevice9* dev) {
     if ((d.Format == D3DFMT_X8R8G8B8 || d.Format == D3DFMT_A8R8G8B8) &&
         SUCCEEDED(dev->CreateOffscreenPlainSurface(d.Width, d.Height, d.Format, D3DPOOL_SYSTEMMEM, &sys, nullptr)) &&
         SUCCEEDED(dev->GetRenderTargetData(bb, sys)) && SUCCEEDED(sys->LockRect(&lr, nullptr, D3DLOCK_READONLY))) {
-        std::string name = "shot_" + std::to_string(frame) + ".ppm";
+        std::string name = now ? std::string("shot_now.ppm") : "shot_" + std::to_string(frame) + ".ppm";
         if (FILE* f = fopen(name.c_str(), "wb")) {
             fprintf(f, "P6\n%u %u\n255\n", d.Width, d.Height);
             std::vector<uint8_t> row(3 * d.Width);

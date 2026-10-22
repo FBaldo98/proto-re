@@ -41,6 +41,10 @@ static inline int64_t RecompTruncF64(double v) {
 
 /* ---- x87 model ---- */
 #define X87(c, i) ((c)->st[((c)->st_top + (i)) & 7])
+/* Localized x87 stack (recomp.py): a function's own copy r_st/r_top, see RLOCALS. */
+#define X87L(i) (r_st[(r_top + (i)) & 7])
+static inline void X87PushL(double* st, uint32_t* top, double v) { *top = (*top - 1) & 7; st[*top] = v; }
+static inline void X87PopL(uint32_t* top) { *top = (*top + 1) & 7; }
 
 static inline void X87Push(Ctx* c, double v) {
     c->st_top = (c->st_top - 1) & 7;
@@ -56,6 +60,9 @@ static inline void X87Init(Ctx* c) {
 
 static inline uint16_t X87StatusWord(const Ctx* c) {
     return (uint16_t)((c->fpu_sw & ~0x3800u) | ((c->st_top & 7) << 11));
+}
+static inline uint16_t X87StatusWordL(const Ctx* c, uint32_t top) {
+    return (uint16_t)((c->fpu_sw & ~0x3800u) | ((top & 7) << 11));
 }
 
 /* Precision control (control word bits 8-9): 00 single, 10 double, 11 extended (modelled as double). */
