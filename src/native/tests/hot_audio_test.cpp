@@ -19,6 +19,8 @@ uint8_t* RecompMemoryBase = nullptr;
 void f_585e8860(Ctx* c);  // recompiled references (ref.c)
 void f_585c62e0(Ctx* c);
 void f_585eb280(Ctx* c);
+void f_5871b610(Ctx* c);
+void Native_1071b610(Ctx* c);
 void Native_105e8860(Ctx* c);
 void Native_105c62e0(Ctx* c);
 void Native_105eb280(Ctx* c);
@@ -30,14 +32,30 @@ static void FakeAlloc(Ctx* c) {
     c->ret_target = Pop32(c);
 }
 void RecompDispatch(Ctx* c, uint32_t target) {
-    if (target == 0x585ba610u) {
-        FakeAlloc(c);
+    if (RecompFn fn = RecompLookup(target)) {
+        fn(c);
         return;
     }
     fprintf(stderr, "unexpected dispatch to %08x\n", target);
     exit(2);
 }
-RecompFn RecompLookup(uint32_t va) { return va == 0x585ba610u ? FakeAlloc : nullptr; }
+// Fake render settings object for FUN_1071b610: vf[0x60](flags) returns the settings, vf[0x1c]() the skip flag.
+static uint32_t g_skip = 0;
+static void FakeGetSettings(Ctx* c) {
+    c->eax = 0x2e000200u;
+    c->ret_target = Pop32(c);
+    c->esp += 4;
+}
+static void FakeSkipFlag(Ctx* c) {
+    c->eax = g_skip;
+    c->ret_target = Pop32(c);
+}
+RecompFn RecompLookup(uint32_t va) {
+    if (va == 0x585ba610u) return FakeAlloc;
+    if (va == 0x2e100060u) return FakeGetSettings;
+    if (va == 0x2e10001cu) return FakeSkipFlag;
+    return nullptr;
+}
 void RecompUnimplemented(Ctx*, uint32_t va, const char* what) {
     fprintf(stderr, "trap %08x %s\n", va, what);
     exit(2);
@@ -78,6 +96,13 @@ int main(int argc, char** argv) {
     }
     fclose(pages);
     MapAt(0x2f000000u, 1u << 20);  // FakeAlloc scratch
+    MapAt(0x2e000000u, 0x1000);     // fake render settings objects
+    W32(0x2e000000u, 0x2e000100u);  // render object -> vtable
+    W32(0x2e000100u + 0x60, 0x2e100060u);
+    W32(0x2e000200u, 0x2e000300u);  // settings object -> vtable
+    W32(0x2e000300u + 0x1c, 0x2e10001cu);
+    W32(0x1127f354u - 0x10000000u + native::kEngineBase, 0x2e000000u);
+    W8(0x111378b0u - 0x10000000u + native::kEngineBase, 0);  // debug asserts off
     MapAt(0x20000000u, 64u << 20);
 
     std::mt19937 rng(1234);
@@ -254,5 +279,54 @@ int main(int argc, char** argv) {
         }
     }
     printf("adpcm %s: %d/200 trials differ\n", failures ? "FAIL" : "OK", failures);
-    return failures || mixer_failures || biquad_failures ? 1 : 0;
+    int adpcm_failures = failures;
+    failures = 0;
+
+    // FUN_1071b610: matrix blending with random bones, weights and frames.
+    for (int trial = 0; trial < 200; ++trial) {
+        g_next = 0x20000000u;
+        const uint32_t count = trial % 9, nbones = 16;
+        uint32_t self = Alloc(0x300), holder = Alloc(0x40), bones = Alloc(nbones * 0x40 + 16);
+        bones = (bones + 15) & ~15u;
+        uint32_t records = Alloc(0x50 * count + 16), out = Alloc(0x30 * count + 16) + (trial % 2) * 4;
+        records = (records + 15) & ~15u;
+        for (uint32_t i = 0; i < nbones * 16; ++i) WF32(bones + 4 * i, uf(rng) * 4.0f);
+        for (uint32_t n = 0; n < count; ++n) {
+            for (uint32_t i = 0; i < 16; ++i) WF32(records + 0x50 * n + 4 * i, uf(rng) * 3.0f);
+            for (uint32_t k = 0; k < 4; ++k) W16(records + 0x50 * n + 0x40 + 2 * k, uint16_t(rng() % nbones));
+        }
+        W32(self + 0x70, holder);
+        W32(holder + 0x38, bones);
+        g_skip = trial % 10 == 0 ? 1 : 0;
+        const uint32_t lo = 0x20000000u, size = g_next - lo;
+        std::vector<uint8_t> start(size), ref(size);
+        memcpy(start.data(), native::Ptr<void>(lo), size);
+        uint32_t stack = Alloc(0x4000) + 0x3000;
+        auto run = [&](void (*fn)(Ctx*)) {
+            memset(native::Ptr<void>(stack - 0x3000), 0, 0x4000);
+            Ctx c;
+            memset(&c, 0, sizeof(c));
+            c.esp = stack;
+            c.ecx = self;
+            Push32(&c, count);
+            Push32(&c, records);
+            Push32(&c, out);
+            Push32(&c, 0x12345678u);
+            fn(&c);
+            return c;
+        };
+        memcpy(native::Ptr<void>(lo), start.data(), size);
+        Ctx a = run(f_5871b610);
+        memcpy(ref.data(), native::Ptr<void>(lo), size);
+        memcpy(native::Ptr<void>(lo), start.data(), size);
+        Ctx b = run(Native_1071b610);
+        bool same_regs = a.esp == b.esp && a.ret_target == b.ret_target && a.ebx == b.ebx && a.esi == b.esi &&
+                         a.edi == b.edi && a.ebp == b.ebp;
+        if (!same_regs || memcmp(ref.data(), native::Ptr<void>(lo), size) != 0) {
+            if (failures < 3) printf("skin trial %d differs%s\n", trial, same_regs ? "" : " (registers)");
+            ++failures;
+        }
+    }
+    printf("skin %s: %d/200 trials differ\n", failures ? "FAIL" : "OK", failures);
+    return failures || mixer_failures || biquad_failures || adpcm_failures ? 1 : 0;
 }

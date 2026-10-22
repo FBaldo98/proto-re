@@ -9,35 +9,12 @@
 #include <cstring>
 #include <initializer_list>
 
-#include "guest.h"
+#include "hot_common.h"
 
 #pragma STDC FP_CONTRACT OFF
 #pragma clang fp contract(off)
 
 namespace native {
-
-namespace {
-
-// Engine addresses in this file are the DLL's (preferred base 0x10000000); the engine is loaded at kEngineBase.
-inline uint32_t E(uint32_t a) { return a - 0x10000000u + kEngineBase; }
-
-inline float F(uint32_t a) { return RF32(a); }
-inline const float* FP(uint32_t a) { return Ptr<const float>(a); }
-
-// Calls a recompiled engine function (cdecl) from native code on the same guest stack; returns eax.
-uint32_t CallGuestCdecl(Ctx* c, uint32_t engine_va, std::initializer_list<uint32_t> args) {
-    const uint32_t va = E(engine_va);
-    RecompFn fn = RecompLookup(va);
-    const uint32_t* a = args.end();
-    while (a != args.begin()) Push32(c, *--a);
-    Push32(c, 0xfffffff0u);  // return address, never used: the callee only pops it
-    if (fn) fn(c);
-    else RecompDispatch(c, va);
-    c->esp += 4 * uint32_t(args.size());
-    return c->eax;
-}
-
-}  // namespace
 
 // FUN_105e8860 (cdecl, 4 args): resamples each channel of a voice into a 256-sample block (linear interpolation,
 // 20.12 fixed-point phase over a power-of-two ring buffer), optionally meters it, and mixes it into the output
@@ -143,7 +120,7 @@ extern "C" void Native_105eb280(Ctx* c) {
     uint32_t channels = R32(p1 + 0x94);
     uint32_t dest[64] = {};
     if (channels != 0) {
-        CallGuestCdecl(c, 0x105ba610, {blocks << 7, 0x10});
+        CallGuestCdecl(c, E(0x105ba610), {blocks << 7, 0x10});
         for (uint32_t ch = 0; ch < channels && ch < 64; ++ch) dest[ch] = (R32(p1 + 0xc + 4 * ch) + p3 * 0x80) & ~3u;
     }
     const int32_t* steps = Ptr<const int32_t>(E(0x10e314f8));
