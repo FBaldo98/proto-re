@@ -4,6 +4,10 @@
 // keep their value in the slot itself.
 #include <sys/mman.h>
 
+#include <unistd.h>
+
+#include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <map>
@@ -36,6 +40,58 @@ std::vector<Slot>& Slots() {
 }
 
 std::string Key(const char* dll, const char* name) { return std::string(dll) + "!" + name; }
+
+// Setting import_profile: every thread logs, every 10 s, where its wall time went - the imports (WinAPI, D3D9
+// methods) it spent the most time in, inclusive of nested calls, and the rest (guest code). Finds the waits that
+// keep a frame long while no thread is busy.
+bool ImportProfiling() {
+    static const bool on = SettingInt("import_profile", 0) != 0;
+    return on;
+}
+
+struct ThreadProfile {
+    using Clock = std::chrono::steady_clock;
+    Clock::time_point window = Clock::now();
+    std::vector<uint64_t> ns, calls;
+    int depth = 0;
+};
+
+void ProfiledCall(const Slot& s, uint32_t index, Ctx* ctx) {
+    thread_local ThreadProfile tp;
+    if (tp.ns.size() <= index) {
+        tp.ns.resize(index + 64);
+        tp.calls.resize(index + 64);
+    }
+    auto t0 = ThreadProfile::Clock::now();
+    ++tp.depth;
+    s.fn(ctx);
+    --tp.depth;
+    auto t1 = ThreadProfile::Clock::now();
+    tp.ns[index] += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
+    ++tp.calls[index];
+    if (tp.depth || t1 - tp.window < std::chrono::seconds(10)) return;
+    const double wall = std::chrono::duration<double, std::milli>(t1 - tp.window).count();
+    std::vector<uint32_t> order;
+    for (uint32_t i = 0; i < tp.ns.size(); ++i) {
+        if (tp.calls[i]) order.push_back(i);
+    }
+    std::sort(order.begin(), order.end(), [](uint32_t a, uint32_t b) { return tp.ns[a] > tp.ns[b]; });
+    std::string line;
+    double in_imports = 0;
+    for (uint32_t i : order) in_imports += double(tp.ns[i]) / 1e6;
+    auto& slots = Slots();
+    for (size_t k = 0; k < order.size() && k < 10; ++k) {
+        uint32_t i = order[k];
+        char buf[160];
+        snprintf(buf, sizeof(buf), " %s %.0f%% (%llu)", slots[i].name.c_str(), 100.0 * double(tp.ns[i]) / 1e6 / wall,
+                 (unsigned long long)tp.calls[i]);
+        line += buf;
+    }
+    Log("imports tid %d: guest %.0f%% |%s", int(gettid()), 100.0 * (wall - in_imports) / wall, line.c_str());
+    std::fill(tp.ns.begin(), tp.ns.end(), 0);
+    std::fill(tp.calls.begin(), tp.calls.end(), 0);
+    tp.window = t1;
+}
 
 }  // namespace
 
@@ -76,7 +132,11 @@ bool DispatchImport(Ctx* ctx, uint32_t target) {
         Fatal("unimplemented import %s!%s (called from %08x, args %08x %08x %08x %08x)", s.dll.c_str(),
               s.name.c_str(), R32(ctx->esp), Arg(ctx, 0), Arg(ctx, 1), Arg(ctx, 2), Arg(ctx, 3));
     }
-    s.fn(ctx);
+    if (ImportProfiling()) {
+        ProfiledCall(s, index, ctx);
+    } else {
+        s.fn(ctx);
+    }
     return true;
 }
 
