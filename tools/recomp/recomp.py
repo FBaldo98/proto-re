@@ -396,7 +396,7 @@ class FunctionCompiler:
                 b = self.pe.get_data(t - BASE, 5)
             except Exception:
                 return t
-            if b[0] != 0xE9:
+            if len(b) < 5 or b[0] != 0xE9:
                 return t
             t = (t + 5 + int.from_bytes(b[1:5], "little", signed=True)) & 0xffffffff
         return t
