@@ -119,16 +119,19 @@ static inline void WF64(uint32_t a, double v) { memcpy(G(a), &v, 8); }
 static inline void Push32(Ctx* c, uint32_t v) { c->esp -= 4; StackW32(c->esp, v); }
 static inline uint32_t Pop32(Ctx* c) { uint32_t v = StackR32(c->esp); c->esp += 4; return v; }
 
-/* Register localization (tools/recomp/recomp.py): inside a recompiled function the eight general registers live in
- * C locals, which the host compiler keeps in machine registers (guest memory writes cannot alias them, and TSO
+/* Register localization (tools/recomp/recomp.py): inside a recompiled function the eight general registers and the
+ * arithmetic flags live in C locals, which the host compiler keeps in machine registers (guest memory writes cannot alias them, and TSO
  * barriers do not apply to them). They are written back to the context before anything that reads it - calls out
  * of the function, the dispatcher, traps, returns - and reloaded after calls. */
 #define RLOCALS uint32_t r_eax = c->eax, r_ecx = c->ecx, r_edx = c->edx, r_ebx = c->ebx, r_esp = c->esp, \
-                         r_ebp = c->ebp, r_esi = c->esi, r_edi = c->edi
+                         r_ebp = c->ebp, r_esi = c->esi, r_edi = c->edi; \
+                RFlags rf = {c->cf, c->zf, c->sf, c->of, c->pf, c->df, c->af}
 #define RSPILL (c->eax = r_eax, c->ecx = r_ecx, c->edx = r_edx, c->ebx = r_ebx, c->esp = r_esp, c->ebp = r_ebp, \
-                c->esi = r_esi, c->edi = r_edi)
+                c->esi = r_esi, c->edi = r_edi, c->cf = rf.cf, c->zf = rf.zf, c->sf = rf.sf, c->of = rf.of, \
+                c->pf = rf.pf, c->df = rf.df, c->af = rf.af)
 #define RRELOAD (r_eax = c->eax, r_ecx = c->ecx, r_edx = c->edx, r_ebx = c->ebx, r_esp = c->esp, r_ebp = c->ebp, \
-                 r_esi = c->esi, r_edi = c->edi)
+                 r_esi = c->esi, r_edi = c->edi, rf.cf = c->cf, rf.zf = c->zf, rf.sf = c->sf, rf.of = c->of, \
+                 rf.pf = c->pf, rf.df = c->df, rf.af = c->af)
 static inline void LPush32(uint32_t* esp, uint32_t v) { *esp -= 4; StackW32(*esp, v); }
 static inline uint32_t LPop32(uint32_t* esp) { uint32_t v = StackR32(*esp); *esp += 4; return v; }
 
@@ -152,50 +155,60 @@ static inline uint8_t Parity(uint32_t v) {
 
 static inline uint32_t Mask(int bits) { return bits == 32 ? 0xffffffffu : ((1u << bits) - 1); }
 
-static inline uint32_t AddFlags(Ctx* c, uint32_t a, uint32_t b, uint32_t carry, int bits) {
-    uint64_t wide = (uint64_t)(a & Mask(bits)) + (b & Mask(bits)) + carry;
-    uint32_t r = (uint32_t)wide & Mask(bits);
-    uint32_t sign = 1u << (bits - 1);
-    c->cf = (wide >> bits) & 1;
-    c->zf = r == 0;
-    c->sf = (r & sign) != 0;
-    c->of = ((~(a ^ b) & (a ^ r)) & sign) != 0;
-    c->pf = Parity(r);
-    return r;
-}
-
-static inline uint32_t SubFlags(Ctx* c, uint32_t a, uint32_t b, uint32_t borrow, int bits) {
-    uint32_t am = a & Mask(bits), bm = b & Mask(bits);
-    uint64_t wide = (uint64_t)am - bm - borrow;
-    uint32_t r = (uint32_t)wide & Mask(bits);
-    uint32_t sign = 1u << (bits - 1);
-    c->cf = (uint64_t)am < (uint64_t)bm + borrow;
-    c->zf = r == 0;
-    c->sf = (r & sign) != 0;
-    c->of = (((a ^ b) & (a ^ r)) & sign) != 0;
-    c->pf = Parity(r);
-    return r;
-}
-
 /* ---- 128-bit memory ---- */
 static inline XmmValue RecompLoad128(uint32_t a) { XmmValue v; memcpy(&v, G(a), 16); return v; }
 static inline void RecompStore128(uint32_t a, XmmValue v) { memcpy(G(a), &v, 16); }
 
-/* ---- EFLAGS ---- */
-static inline uint8_t RecompLahf(const Ctx* c) {
-    return (uint8_t)((c->sf << 7) | (c->zf << 6) | (c->af << 4) | (c->pf << 2) | 2u | c->cf);
-}
-static inline void RecompSahf(Ctx* c, uint8_t ah) {
-    c->sf = (ah >> 7) & 1; c->zf = (ah >> 6) & 1; c->af = (ah >> 4) & 1; c->pf = (ah >> 2) & 1; c->cf = ah & 1;
-}
-static inline uint32_t RecompEflags(const Ctx* c) {
-    return RecompLahf(c) | ((uint32_t)c->df << 10) | ((uint32_t)c->of << 11) | 0x200u;
-}
-static inline void RecompSetEflags(Ctx* c, uint32_t f) {
-    RecompSahf(c, (uint8_t)f);
-    c->df = (f >> 10) & 1;
-    c->of = (f >> 11) & 1;
-}
+/* Flag helpers exist twice: on the context, and on a function's local copy of the flags (RFlags, see RLOCALS),
+ * which the host compiler keeps in registers. Same bodies; only the flag fields are used. */
+typedef struct RFlags {
+    uint8_t cf, zf, sf, of, pf, df, af;
+} RFlags;
+#define RECOMP_FLAG_FUNCS(S, T) \
+    static inline uint32_t AddFlags##S(T* c, uint32_t a, uint32_t b, uint32_t carry, int bits) { \
+        uint64_t wide = (uint64_t)(a & Mask(bits)) + (b & Mask(bits)) + carry; \
+        uint32_t r = (uint32_t)wide & Mask(bits); \
+        uint32_t sign = 1u << (bits - 1); \
+        c->cf = (wide >> bits) & 1; \
+        c->zf = r == 0; \
+        c->sf = (r & sign) != 0; \
+        c->of = ((~(a ^ b) & (a ^ r)) & sign) != 0; \
+        c->pf = Parity(r); \
+        return r; \
+    } \
+     \
+    static inline uint32_t SubFlags##S(T* c, uint32_t a, uint32_t b, uint32_t borrow, int bits) { \
+        uint32_t am = a & Mask(bits), bm = b & Mask(bits); \
+        uint64_t wide = (uint64_t)am - bm - borrow; \
+        uint32_t r = (uint32_t)wide & Mask(bits); \
+        uint32_t sign = 1u << (bits - 1); \
+        c->cf = (uint64_t)am < (uint64_t)bm + borrow; \
+        c->zf = r == 0; \
+        c->sf = (r & sign) != 0; \
+        c->of = (((a ^ b) & (a ^ r)) & sign) != 0; \
+        c->pf = Parity(r); \
+        return r; \
+    } \
+     \
+     \
+    static inline uint8_t RecompLahf##S(const T* c) { \
+        return (uint8_t)((c->sf << 7) | (c->zf << 6) | (c->af << 4) | (c->pf << 2) | 2u | c->cf); \
+    } \
+    static inline void RecompSahf##S(T* c, uint8_t ah) { \
+        c->sf = (ah >> 7) & 1; c->zf = (ah >> 6) & 1; c->af = (ah >> 4) & 1; c->pf = (ah >> 2) & 1; c->cf = ah & 1; \
+    } \
+    static inline uint32_t RecompEflags##S(const T* c) { \
+        return RecompLahf##S(c) | ((uint32_t)c->df << 10) | ((uint32_t)c->of << 11) | 0x200u; \
+    } \
+    static inline void RecompSetEflags##S(T* c, uint32_t f) { \
+        RecompSahf##S(c, (uint8_t)f); \
+        c->df = (f >> 10) & 1; \
+        c->of = (f >> 11) & 1; \
+    }
+RECOMP_FLAG_FUNCS(, Ctx)
+RECOMP_FLAG_FUNCS(L, RFlags)
+
+
 
 /* ---- setjmp/longjmp (MSVCR80 _setjmp3/longjmp, used by the engine's Lua) ----
  * The guest jmp_buf is never written: the generated code calls the host setjmp in the recompiled function's own

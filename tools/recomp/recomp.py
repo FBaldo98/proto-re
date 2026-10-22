@@ -185,6 +185,12 @@ def load_functions():
 
 # ---- register localization (see RLOCALS in runtime.h) ----
 _REG_RE = re.compile(r"c->(eax|ecx|edx|ebx|esp|ebp|esi|edi)\b")
+_FLAG_RE = re.compile(r"c->(cf|zf|sf|of|pf|df|af)\b")
+# Flag helpers with a variant on the local RFlags copy.
+_FLAG_CALLS = [("SubFlags(c, ", "SubFlagsL(&rf, "), ("AddFlags(c, ", "AddFlagsL(&rf, "),
+               ("RECOMP_FLAGS_LOGIC(c, ", "RECOMP_FLAGS_LOGIC(&rf, "), ("RecompLahf(c)", "RecompLahfL(&rf)"),
+               ("RecompSahf(c, ", "RecompSahfL(&rf, "), ("RecompEflags(c)", "RecompEflagsL(&rf)"),
+               ("RecompSetEflags(c, ", "RecompSetEflagsL(&rf, "), ("X87CompareFlags(c, ", "X87CompareFlagsL(&rf, ")]
 # Callees that read or write the general registers through the context: spill before, reload after.
 _SPILL_CALL_RE = re.compile(r"\b(f_[0-9a-f]{8}|RecompDispatch|RecompUnimplemented|RecompCpuid|RecompLongjmp)\(c\b")
 
@@ -215,10 +221,13 @@ def localize(line):
         # setjmp: the context must be current when the jmp_buf is prepared; after a longjmp the locals are stale and
         # RecompSetjmpResume has restored the context, so reload from it.
         line = line.replace("{ uint32_t jb = R32(c->esp); if", "{ uint32_t jb = R32(r_esp); RSPILL; if")
-        line = line.replace("{ c->eax = 0; }", "{ r_eax = 0; }")
+        line = line.replace("{ c->eax = 0; }", "{ r_eax = 0; }")  # setjmp's flags: spilled/reloaded with the rest
         line = line.replace("RecompSetjmpResume(c, R32(c->esp)); }", "RecompSetjmpResume(c, R32(c->esp)); RRELOAD; }")
         return line
     line = _REG_RE.sub(r"r_\1", line)
+    line = _FLAG_RE.sub(r"rf.\1", line)
+    for old, new in _FLAG_CALLS:
+        line = line.replace(old, new)
     line = line.replace("Push32(c, ", "LPush32(&r_esp, ").replace("Pop32(c)", "LPop32(&r_esp)")
     line = _wrap_calls(line)
     return re.sub(r"\breturn;", "{ RSPILL; return; }", line)

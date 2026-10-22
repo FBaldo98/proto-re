@@ -104,6 +104,13 @@ static inline void X87CompareFlags(Ctx* c, double a, double b) {
     c->cf = un || a < b;
     c->of = c->sf = c->af = 0;
 }
+static inline void X87CompareFlagsL(RFlags* c, double a, double b) {
+    int un = a != a || b != b;
+    c->zf = un || a == b;
+    c->pf = un;
+    c->cf = un || a < b;
+    c->of = c->sf = c->af = 0;
+}
 
 /* 80-bit extended values, converted to/from double. */
 static inline double RecompLoadF80(uint32_t a) {
