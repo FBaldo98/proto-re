@@ -40,7 +40,7 @@ SETJMP_TARGETS = {0x10a88a30}
 # truncation, stack probes (alloca/large frames) and 64-bit integer helpers.
 # Engine functions replaced by native implementations in the native host (src/native/hot_*.cpp): f_<addr> just
 # forwards to Native_<original addr>.
-NATIVE_OVERRIDES = {0x105e8860}
+NATIVE_OVERRIDES = {0x105e8860, 0x105c62e0}
 INLINE_HELPERS = {0x10a88426: "ftol2", 0x10a883b0: "chkstk", 0x10a889e0: "chkstk16", 0x10a889f6: "chkstk8",
                   0x10a88370: "allmul", 0x10a884b0: "allshl", 0x10ba2b50: "aullshr"}
 SETJMP_IAT = {0x11331fc4}

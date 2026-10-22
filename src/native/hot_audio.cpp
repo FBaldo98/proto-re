@@ -88,4 +88,33 @@ extern "C" void Native_105e8860(Ctx* c) {
     c->ret_target = Pop32(c);  // cdecl
 }
 
+// FUN_105c62e0 (cdecl, 1 arg): biquad IIR filter (direct form I), output accumulated.
+//   arg: +0xc coefficients/state (16-byte aligned down: b0 b1 b2 a0 a1 a2, then x1 x2 y1 y2),
+//        +0x10 input, +0x14 output (both 4-byte aligned down), +0x18 sample count
+extern "C" void Native_105c62e0(Ctx* c) {
+    const uint32_t arg = R32(c->esp + 4);
+    const uint32_t st = R32(arg + 0xc) & ~0xfu;
+    const float* in = FP(R32(arg + 0x10) & ~3u);
+    float* out = Ptr<float>(R32(arg + 0x14) & ~3u);
+    const int32_t count = int32_t(R32(arg + 0x18));
+    const float inv = F(E(0x10d946e0)) / F(st + 0xc);
+    const float b0 = F(st) * inv, b1 = F(st + 4) * inv, b2 = F(st + 8) * inv;
+    const float a1 = F(st + 0x10) * inv, a2 = F(st + 0x14) * inv;
+    float x1 = F(st + 0x18), x2 = F(st + 0x1c), y1 = F(st + 0x20), y2 = F(st + 0x24);
+    for (int32_t i = 0; i < count; ++i) {
+        const float x = in[i];
+        const float y = (((x * b0 + x2 * b2) + x1 * b1) - y1 * a1) - y2 * a2;
+        out[i] = out[i] + y;
+        x2 = x1;
+        x1 = x;
+        y2 = y1;
+        y1 = y;
+    }
+    WF32(st + 0x20, y1);
+    WF32(st + 0x18, x1);
+    WF32(st + 0x1c, x2);
+    WF32(st + 0x24, y2);
+    c->ret_target = Pop32(c);  // cdecl
+}
+
 }  // namespace native

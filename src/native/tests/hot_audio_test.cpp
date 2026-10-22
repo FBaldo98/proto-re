@@ -16,8 +16,10 @@
 extern "C" {
 volatile uint32_t RecompRestrictLo = 0, RecompRestrictHi = 0xffffffffu, RecompTestDetours = 0;
 uint8_t* RecompMemoryBase = nullptr;
-void f_585e8860(Ctx* c);  // recompiled reference (ref.c)
+void f_585e8860(Ctx* c);  // recompiled references (ref.c)
+void f_585c62e0(Ctx* c);
 void Native_105e8860(Ctx* c);
+void Native_105c62e0(Ctx* c);
 void RecompDispatch(Ctx* c, uint32_t target) {
     fprintf(stderr, "unexpected dispatch to %08x\n", target);
     exit(2);
@@ -53,11 +55,12 @@ void MapAt(uint32_t addr, uint32_t size) {
 int main(int argc, char** argv) {
     // Engine constants used by the function (DLL addresses, values read by run_hot_test.sh).
     if (argc < 4) return 1;
-    const uint32_t const_addrs[3] = {0x10e2e9dc, 0x10e2e864, 0x10e313a4};
-    for (int i = 0; i < 3; ++i) {
+    const uint32_t const_addrs[4] = {0x10e2e9dc, 0x10e2e864, 0x10e313a4, 0x10d946e0};
+    if (argc < 5) return 1;
+    for (int i = 0; i < 4; ++i) {
         uint32_t a = const_addrs[i] - 0x10000000u + native::kEngineBase;
         uint32_t page = a & ~0xfffu;
-        static uint32_t mapped[3];
+        static uint32_t mapped[4];
         bool done = false;
         for (int k = 0; k < i; ++k) done |= mapped[k] == page;
         if (!done) MapAt(page, 0x1000);
@@ -144,6 +147,53 @@ int main(int argc, char** argv) {
             ++failures;
         }
     }
-    printf("%s: %d/200 trials differ\n", failures ? "FAIL" : "OK", failures);
-    return failures ? 1 : 0;
+    printf("mixer %s: %d/200 trials differ\n", failures ? "FAIL" : "OK", failures);
+    int mixer_failures = failures;
+    failures = 0;
+
+    // FUN_105c62e0: biquad on random coefficients/state, misaligned pointers, various lengths.
+    for (int trial = 0; trial < 300; ++trial) {
+        g_next = 0x20000000u;
+        const uint32_t count = trial % 37;
+        uint32_t arg = Alloc(0x20), st = Alloc(0x40) + (trial % 4) * 4;  // aligned down to 16 by the code
+        uint32_t in = Alloc(4 * 64) + (trial % 3), out = Alloc(4 * 64) + (trial % 2);
+        for (uint32_t i = 0; i < 0x40; i += 4) WF32((st & ~0xfu) + i, uf(rng));
+        WF32((st & ~0xfu) + 0xc, 0.5f + (uf(rng) + 1.0f));  // a0 away from zero
+        for (uint32_t i = 0; i < 64; ++i) {
+            WF32((in & ~3u) + 4 * i, uf(rng));
+            WF32((out & ~3u) + 4 * i, uf(rng));
+        }
+        W32(arg + 0xc, st);
+        W32(arg + 0x10, in);
+        W32(arg + 0x14, out);
+        W32(arg + 0x18, count);
+        const uint32_t lo = 0x20000000u, size = g_next - lo;
+        std::vector<uint8_t> start(size), ref(size);
+        memcpy(start.data(), native::Ptr<void>(lo), size);
+        uint32_t stack = Alloc(0x4000) + 0x3000;
+        auto run = [&](void (*fn)(Ctx*)) {
+            memset(native::Ptr<void>(stack - 0x3000), 0, 0x4000);
+            Ctx c;
+            memset(&c, 0, sizeof(c));
+            c.fpu_cw = 0x007f;
+            c.esp = stack;
+            Push32(&c, arg);
+            Push32(&c, 0x12345678u);
+            fn(&c);
+            return c;
+        };
+        memcpy(native::Ptr<void>(lo), start.data(), size);
+        Ctx a = run(f_585c62e0);
+        memcpy(ref.data(), native::Ptr<void>(lo), size);
+        memcpy(native::Ptr<void>(lo), start.data(), size);
+        Ctx b = run(Native_105c62e0);
+        bool same_regs = a.esp == b.esp && a.ret_target == b.ret_target && a.ebx == b.ebx && a.esi == b.esi &&
+                         a.edi == b.edi && a.ebp == b.ebp;
+        if (!same_regs || memcmp(ref.data(), native::Ptr<void>(lo), size) != 0) {
+            if (failures < 3) printf("biquad trial %d (count %u) differs%s\n", trial, count, same_regs ? "" : " (registers)");
+            ++failures;
+        }
+    }
+    printf("biquad %s: %d/300 trials differ\n", failures ? "FAIL" : "OK", failures);
+    return failures || mixer_failures ? 1 : 0;
 }
