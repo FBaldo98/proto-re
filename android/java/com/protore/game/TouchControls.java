@@ -89,9 +89,10 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
     }
 
     // Right thumb: УДАР in the corner, the inner arc (radius ~105 dp around it) for СПЕЦ / ЗАХВАТ / ПРЫЖОК, the
-    // outer arc (~190 dp) for the rarer ЦЕЛЬ and БЕГ. Menu keys and СИЛЫ along the top edge.
+    // outer arc (~190 dp) for the rarer ЦЕЛЬ and БЕГ. Menu keys and СИЛЫ along the top right edge, clear of the
+    // health bar.
     private final Button[] buttons = {
-        new Button("ENTER", KeyEvent.KEYCODE_ENTER, 0, false, 160, false, 33, 24, false),
+        new Button("ENTER", KeyEvent.KEYCODE_ENTER, 0, true, 280, false, 33, 24, false),
         new Button("ESC", KeyEvent.KEYCODE_ESCAPE, 0, true, 100, false, 33, 24, false),
         new Button("УДАР", 0, MOUSE_LEFT, true, 78, true, 74, 46, true),
         new Button("СПЕЦ", 0, MOUSE_RIGHT, true, 183, true, 62, 33, true),
@@ -335,8 +336,8 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
             stickHomeX = stickCustomX * w;
             stickHomeY = stickCustomY * h;
         } else {
-            stickHomeX = 118 * u;
-            stickHomeY = h - 104 * u;
+            stickHomeX = 225 * u;  // right of the minimap
+            stickHomeY = h - 112 * u;
         }
         stickX = knobX = stickHomeX;
         stickY = knobY = stickHomeY;
