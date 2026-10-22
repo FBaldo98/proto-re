@@ -116,4 +116,10 @@ extern const char* g_game_dir;
 std::string Setting(const char* key, const char* def);
 int SettingInt(const char* key, int def);
 
+// Android performance hints (perf_hint.cpp): frame budget and per-frame work for the system's CPU clocking.
+void PerfHintStart(int fps_target);
+void PerfHintAddThread(int tid);
+void PerfHintTarget(int fps_target);
+void PerfHintFrame(int64_t work_ns);
+
 }  // namespace native

@@ -107,6 +107,7 @@ extern "C" JNIEXPORT jint JNICALL Java_com_protore_game_TouchControls_nativeMemo
 }
 extern "C" JNIEXPORT void JNICALL Java_com_protore_game_TouchControls_nativeSetFpsLimit(JNIEnv*, jclass, jint fps) {
     native::g_fps_limit.store(fps);
+    native::PerfHintTarget(fps);
 }
 #endif
 
@@ -115,7 +116,8 @@ extern "C" JNIEXPORT void JNICALL Java_com_protore_game_TouchControls_nativeSetF
 // lands on a small core for a while. Setting big_cores (Android default 1).
 static void PinToBigCores() {
 #ifdef __ANDROID__
-    if (!native::SettingInt("big_cores", 1)) return;
+    // battery_saver: the scheduler picks the cores (the biggest ones draw several times the power per clock)
+    if (!native::SettingInt("big_cores", 1) || native::SettingInt("battery_saver", 0)) return;
     int caps[64] = {}, max_cap = 0, n = 0;
     for (; n < 64; ++n) {
         char path[96];
@@ -288,7 +290,10 @@ int main(int argc, char** argv) {
     static std::atomic<uint64_t> frames{0};
     StartWatchdog(&frames);
     PinToBigCores();
-    g_fps_limit.store(SettingInt("fps_limit", 0));
+    int fps_limit = SettingInt("fps_limit", 0);
+    if (SettingInt("battery_saver", 0) && (fps_limit == 0 || fps_limit > 30)) fps_limit = 30;
+    g_fps_limit.store(fps_limit);
+    PerfHintStart(fps_limit);
     using Clock = std::chrono::steady_clock;
     Clock::time_point stats_start = Clock::now(), frame_start = stats_start, next_log = stats_start;
     uint64_t stats_frames = 0;
@@ -296,6 +301,7 @@ int main(int argc, char** argv) {
         frames.store(frame, std::memory_order_relaxed);
         // Frame time, FPS over the last second, a perf line in the log every 30 s, and the optional limiter.
         Clock::time_point now = Clock::now();
+        PerfHintFrame(std::chrono::duration_cast<std::chrono::nanoseconds>(now - frame_start).count());
         if (int limit = g_fps_limit.load(); limit > 0) {
             Clock::time_point due = frame_start + std::chrono::microseconds(1000000 / limit);
             if (now < due) {

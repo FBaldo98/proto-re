@@ -599,6 +599,7 @@ K(SetThreadPriority) {
     if (tid) {
         int r = setpriority(PRIO_PROCESS, id_t(tid), nice);
         Log("SetThreadPriority(%d) -> nice %d on tid %d%s", prio, nice, tid, r == 0 ? "" : " (not permitted)");
+        if (prio == 2) PerfHintAddThread(tid);  // THREAD_PRIORITY_HIGHEST: the engine's render thread
     }
     Return(c, 1, 2);
 }

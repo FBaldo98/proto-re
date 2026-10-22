@@ -137,6 +137,7 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
                 new int[] {0, 1, 2}, true),
         new Setting("Лимит FPS", "fps_limit", new String[] {"Нет", "30", "45", "60"}, new int[] {0, 30, 45, 60},
                 true),
+        new Setting("Экономия батареи", "battery_saver", new String[] {"Выкл", "Вкл"}, new int[] {0, 1}, true),
         new Setting("Прозрачность", "ui_opacity", new String[] {"40%", "60%", "80%", "100%"},
                 new int[] {40, 60, 80, 100}, false),
         new Setting("Размер кнопок", "ui_scale", new String[] {"80%", "100%", "120%", "140%"},
@@ -149,7 +150,7 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
                 new int[] {50, 75, 100, 150, 200}, false),
         new Setting("Инверсия Y", "ui_invert", new String[] {"Выкл", "Вкл"}, new int[] {0, 1}, false),
     };
-    private static final int[] DEFAULTS = {1, 1, 0, 2, 1, 1, 0, 1, 0, 2, 0};
+    private static final int[] DEFAULTS = {1, 1, 0, 0, 2, 1, 1, 0, 1, 0, 2, 0};
     private boolean panelOpen = false, restartNeeded = false;
     private final RectF panel = new RectF(), restartRect = new RectF(), closeRect = new RectF(),
             layoutRect = new RectF();
@@ -249,14 +250,14 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
 
     private void applyUiSettings() {
         cache.clear();
-        opacity = settings[3].value() / 100f;
-        scale = settings[4].value() / 100f;
-        vibrate = settings[5].value() != 0;
-        showFps = settings[6].value() != 0;
-        hideWithPad = settings[7].value() != 0;
-        autoRun = settings[8].value() != 0;
-        camGain = settings[9].value() / 100f;
-        invertY = settings[10].value() != 0;
+        opacity = settings[4].value() / 100f;
+        scale = settings[5].value() / 100f;
+        vibrate = settings[6].value() != 0;
+        showFps = settings[7].value() != 0;
+        hideWithPad = settings[8].value() != 0;
+        autoRun = settings[9].value() != 0;
+        camGain = settings[10].value() / 100f;
+        invertY = settings[11].value() != 0;
         layoutButtons(getWidth(), getHeight());
     }
 
