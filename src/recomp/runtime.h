@@ -119,6 +119,19 @@ static inline void WF64(uint32_t a, double v) { memcpy(G(a), &v, 8); }
 static inline void Push32(Ctx* c, uint32_t v) { c->esp -= 4; StackW32(c->esp, v); }
 static inline uint32_t Pop32(Ctx* c) { uint32_t v = StackR32(c->esp); c->esp += 4; return v; }
 
+/* Register localization (tools/recomp/recomp.py): inside a recompiled function the eight general registers live in
+ * C locals, which the host compiler keeps in machine registers (guest memory writes cannot alias them, and TSO
+ * barriers do not apply to them). They are written back to the context before anything that reads it - calls out
+ * of the function, the dispatcher, traps, returns - and reloaded after calls. */
+#define RLOCALS uint32_t r_eax = c->eax, r_ecx = c->ecx, r_edx = c->edx, r_ebx = c->ebx, r_esp = c->esp, \
+                         r_ebp = c->ebp, r_esi = c->esi, r_edi = c->edi
+#define RSPILL (c->eax = r_eax, c->ecx = r_ecx, c->edx = r_edx, c->ebx = r_ebx, c->esp = r_esp, c->ebp = r_ebp, \
+                c->esi = r_esi, c->edi = r_edi)
+#define RRELOAD (r_eax = c->eax, r_ecx = c->ecx, r_edx = c->edx, r_ebx = c->ebx, r_esp = c->esp, r_ebp = c->ebp, \
+                 r_esi = c->esi, r_edi = c->edi)
+static inline void LPush32(uint32_t* esp, uint32_t v) { *esp -= 4; StackW32(*esp, v); }
+static inline uint32_t LPop32(uint32_t* esp) { uint32_t v = StackR32(*esp); *esp += 4; return v; }
+
 /* ---- flags ---- */
 static inline uint8_t Parity(uint32_t v) {
     v &= 0xff;

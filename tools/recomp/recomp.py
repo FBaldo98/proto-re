@@ -18,12 +18,14 @@ import sys
 import capstone
 from capstone import x86_const as X
 import pefile
+import re
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 DLL = os.environ.get("PROTORE_ENGINE",
                      os.path.expanduser("~/Downloads/Prototype (2009)/Prototype/prototypeenginef.dll"))
 BASE = 0x10000000  # the DLL's preferred base; --base rebases everything (rebase())
 ORIG_BASE = 0x10000000
+LOCALIZE = True  # general registers in C locals (--no-localize to compare)
 
 REG32 = {"eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi"}
 REG16 = {"ax": "eax", "cx": "ecx", "dx": "edx", "bx": "ebx", "sp": "esp", "bp": "ebp", "si": "esi", "di": "edi"}
@@ -179,6 +181,47 @@ def load_functions():
         nxt = bound[i] if i < len(bound) else va + size
         extents[va] = max(size, nxt - va)
     return extents
+
+
+# ---- register localization (see RLOCALS in runtime.h) ----
+_REG_RE = re.compile(r"c->(eax|ecx|edx|ebx|esp|ebp|esi|edi)\b")
+# Callees that read or write the general registers through the context: spill before, reload after.
+_SPILL_CALL_RE = re.compile(r"\b(f_[0-9a-f]{8}|RecompDispatch|RecompUnimplemented|RecompCpuid|RecompLongjmp)\(c\b")
+
+
+def _wrap_calls(line):
+    out, pos = [], 0
+    for m in _SPILL_CALL_RE.finditer(line):
+        if m.start() < pos:
+            continue
+        depth, i = 0, m.end() - 2  # the opening parenthesis
+        while i < len(line):
+            if line[i] == "(":
+                depth += 1
+            elif line[i] == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        out.append(line[pos:m.start()])
+        out.append(f"(RSPILL, {line[m.start():i + 1]}, RRELOAD)")
+        pos = i + 1
+    out.append(line[pos:])
+    return "".join(out)
+
+
+def localize(line):
+    if "setjmp(" in line:
+        # setjmp: the context must be current when the jmp_buf is prepared; after a longjmp the locals are stale and
+        # RecompSetjmpResume has restored the context, so reload from it.
+        line = line.replace("{ uint32_t jb = R32(c->esp); if", "{ uint32_t jb = R32(r_esp); RSPILL; if")
+        line = line.replace("{ c->eax = 0; }", "{ r_eax = 0; }")
+        line = line.replace("RecompSetjmpResume(c, R32(c->esp)); }", "RecompSetjmpResume(c, R32(c->esp)); RRELOAD; }")
+        return line
+    line = _REG_RE.sub(r"r_\1", line)
+    line = line.replace("Push32(c, ", "LPush32(&r_esp, ").replace("Pop32(c)", "LPop32(&r_esp)")
+    line = _wrap_calls(line)
+    return re.sub(r"\breturn;", "{ RSPILL; return; }", line)
 
 
 class FunctionCompiler:
@@ -1090,6 +1133,8 @@ class FunctionCompiler:
                 line = f'RecompUnimplemented(c, 0x{i.address:08x}u, "{i.mnemonic} {i.op_str}"); return;'
             body.append((i, line))
         out = [f"void f_{self.va:08x}(Ctx* c) {{"]
+        if LOCALIZE:
+            out.append("    RLOCALS;")
         trap_labels = set()
         # Fall-through into an instruction that is not next in the output (overlapping decodes) needs its label.
         for n, (i, _) in enumerate(body):
@@ -1120,6 +1165,8 @@ class FunctionCompiler:
             out.append(f'    RecompUnimplemented(c, 0x{t:08x}u, "branch into undecoded bytes"); return;')
         if not self.ins:
             out.append(f'    RecompUnimplemented(c, 0x{self.va:08x}u, "no decodable instruction"); return;')
+        if LOCALIZE:
+            out = out[:2] + [localize(l) if not l.startswith("L_") else l for l in out[2:]]
         out.append("}")
         # Prototypes last: tail jumps added while assembling the body are direct calls too.
         protos = [f"void f_{t:08x}(Ctx* c);" for t in sorted(self.direct_calls - {self.va})]
@@ -1234,7 +1281,10 @@ def main():
     ap.add_argument("--split", type=int, default=0, help="functions per file (writes part_NNNN.c + table.c)")
     ap.add_argument("--base", type=lambda v: int(v, 0), default=ORIG_BASE,
                     help="engine load address (native host: 0x58000000)")
+    ap.add_argument("--no-localize", action="store_true", help="keep general registers in the context")
     args = ap.parse_args()
+    global LOCALIZE
+    LOCALIZE = not args.no_localize
     rebase(args.base)
     sizes = load_functions()
     if args.functions == "all":

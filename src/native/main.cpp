@@ -224,6 +224,7 @@ int main(int argc, char** argv) {
 
     InitInput(FindExport(g_engine, "EngineKeyboardService"), FindExport(g_engine, "EngineMouseService"));
     bool focused = true;
+    const bool ignore_focus = SettingInt("ignore_focus", 0) != 0;  // tests: an unfocused window keeps full speed
     // PROTORE_INPUT="<frame>:<SDL key name>,...": taps a key at that frame (held for 5 frames), for scripted tests.
     struct Tap {
         uint64_t frame;
@@ -283,7 +284,7 @@ int main(int argc, char** argv) {
                 quit = true;
             } else if (e.type == SDL_WINDOWEVENT) {
                 if (e.window.event == SDL_WINDOWEVENT_FOCUS_GAINED) focused = true;
-                if (e.window.event == SDL_WINDOWEVENT_FOCUS_LOST) focused = false;
+                if (e.window.event == SDL_WINDOWEVENT_FOCUS_LOST && !ignore_focus) focused = false;
             } else {
                 ForwardInput(e);
             }
