@@ -3,6 +3,7 @@
 // controls can also act as a pad (TouchControls.nativePad): it answers as slot 0 while no real pad holds it.
 #include <SDL2/SDL.h>
 #ifdef __ANDROID__
+#include <SDL2/SDL_system.h>
 #include <jni.h>
 #endif
 
@@ -29,6 +30,21 @@ struct TouchPad {
     std::atomic<uint8_t> lt{0}, rt{0};
     std::atomic<int16_t> lx{0}, ly{0}, rx{0}, ry{0};
 } g_touch;
+
+#ifdef __ANDROID__
+// The game's rumble on the on-screen pad becomes a phone vibration (TouchControls.rumble, 0..255).
+jclass g_controls = nullptr;  // global ref, taken on the UI thread (FindClass sees app classes only there)
+int g_rumble = 0;
+
+void PhoneRumble(uint16_t left, uint16_t right) {
+    int amp = (left > right ? left : right) >> 8;
+    if (amp == g_rumble || !g_controls) return;
+    g_rumble = amp;
+    auto* env = static_cast<JNIEnv*>(SDL_AndroidGetJNIEnv());
+    static jmethodID rumble = env ? env->GetStaticMethodID(g_controls, "rumble", "(I)V") : nullptr;
+    if (env && rumble) env->CallStaticVoidMethod(g_controls, rumble, jint(amp));
+}
+#endif
 
 // Fills free slots with controllers that are not assigned yet and drops detached ones.
 SDL_GameController* Pad(uint32_t index) {
@@ -117,7 +133,11 @@ void x_XInputSetState(Ctx* c) {
     std::lock_guard<std::mutex> lock(g_mutex);
     SDL_GameController* p = Pad(Arg(c, 0));
     if (!p) {
-        Return(c, Arg(c, 0) == 0 && g_touch.active.load() ? 0 : kNotConnected, 2);
+        const bool touch = Arg(c, 0) == 0 && g_touch.active.load();
+#ifdef __ANDROID__
+        if (touch) PhoneRumble(R16(Arg(c, 1)), R16(Arg(c, 1) + 2));
+#endif
+        Return(c, touch ? 0 : kNotConnected, 2);
         return;
     }
     SDL_GameControllerRumble(p, R16(Arg(c, 1)), R16(Arg(c, 1) + 2), 1000);
@@ -158,9 +178,10 @@ ImportRegistrar g_xinput(kXInput);
 #ifdef __ANDROID__
 // TouchControls: the on-screen pad's state (XInput layout: buttons mask, triggers 0..255, sticks with up positive);
 // active false hands slot 0 back to "not connected".
-extern "C" JNIEXPORT void JNICALL Java_com_protore_game_TouchControls_nativePad(JNIEnv*, jclass, jboolean active,
-                                                                               jint buttons, jint lt, jint rt,
-                                                                               jint lx, jint ly, jint rx, jint ry) {
+extern "C" JNIEXPORT void JNICALL Java_com_protore_game_TouchControls_nativePad(JNIEnv* env, jclass cls,
+                                                                               jboolean active, jint buttons,
+                                                                               jint lt, jint rt, jint lx, jint ly,
+                                                                               jint rx, jint ry) {
     g_touch.buttons = uint16_t(buttons);
     g_touch.lt = uint8_t(lt);
     g_touch.rt = uint8_t(rt);
@@ -169,6 +190,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_protore_game_TouchControls_nativePad(
     g_touch.rx = int16_t(rx);
     g_touch.ry = int16_t(ry);
     g_touch.active = active != 0;
+    if (!g_controls) g_controls = static_cast<jclass>(env->NewGlobalRef(cls));
 }
 #endif
 

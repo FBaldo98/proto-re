@@ -19,6 +19,8 @@ import android.view.HapticFeedbackConstants;
 import android.view.InputDevice;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
+import android.os.VibrationEffect;
+import android.os.Vibrator;
 import android.view.View;
 
 import org.libsdl.app.SDLActivity;
@@ -52,6 +54,20 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
     static native void nativeSetFpsLimit(int fps);
     // The on-screen pad (gamepad.cpp): XInput buttons mask, triggers 0..255, sticks -32768..32767 with up positive.
     static native void nativePad(boolean active, int buttons, int lt, int rt, int lx, int ly, int rx, int ry);
+
+    // The game's pad rumble (gamepad.cpp, on its own thread) as a phone vibration, 0..255; 0 stops it.
+    private static Vibrator vibrator;
+    private static volatile boolean rumbleOn;
+
+    static void rumble(int amplitude) {
+        Vibrator v = vibrator;
+        if (v == null || !rumbleOn) return;
+        if (amplitude <= 0) {
+            v.cancel();
+        } else {
+            v.vibrate(VibrationEffect.createOneShot(150, Math.max(1, Math.min(255, amplitude))));
+        }
+    }
 
     private static final int MOUSE_LEFT = 1, MOUSE_RIGHT = 2, MOUSE_MIDDLE = 4;
     // XInput buttons; the triggers get bits above the mask
@@ -217,6 +233,7 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
     public TouchControls(Context context) {
         super(context);
         density = context.getResources().getDisplayMetrics().density;
+        vibrator = (Vibrator) context.getSystemService(Context.VIBRATOR_SERVICE);
         prefs = context.getSharedPreferences("controls", Context.MODE_PRIVATE);
         for (int i = 0; i < settings.length; i++) {
             Setting s = settings[i];
@@ -280,6 +297,7 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
         opacity = settings[3].value() / 100f;
         scale = settings[4].value() / 100f;
         vibrate = settings[5].value() != 0;
+        rumbleOn = vibrate;
         showFps = settings[6].value() != 0;
         hideWithPad = settings[7].value() != 0;
         autoRun = settings[8].value() != 0;
