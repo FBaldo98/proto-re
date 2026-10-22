@@ -69,6 +69,8 @@ static inline uint16_t X87StatusWordL(const Ctx* c, uint32_t top) {
 static inline double X87Precision(const Ctx* c, double v) {
     return ((c->fpu_cw >> 8) & 3) == 0 ? (double)(float)v : v;
 }
+/* Localized form: the function's copy of the control word (r_cw, see recomp.py). */
+static inline double X87PrecisionCW(uint16_t cw, double v) { return ((cw >> 8) & 3) == 0 ? (double)(float)v : v; }
 
 /* Rounding control (bits 10-11): nearest-even, down, up, toward zero. */
 static inline double X87RoundRC(const Ctx* c, double v) {

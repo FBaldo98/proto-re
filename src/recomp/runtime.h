@@ -48,9 +48,14 @@ RecompFn RecompLookup(uint32_t target);
 /* Direct calls between recompiled functions are allowed unless the embedding restricts them (bisect range, test
  * detours in the in-process prototype). */
 extern volatile uint32_t RecompRestrictLo, RecompRestrictHi, RecompTestDetours;
+#ifdef RECOMP_FLAT_MEMORY
+/* Native host: every recompiled function is always called directly (the restriction exists for Wine bisects). */
+static inline int RecompDirect(uint32_t target) { (void)target; return 1; }
+#else
 static inline int RecompDirect(uint32_t target) {
     return RecompTestDetours == 0 && target >= RecompRestrictLo && target < RecompRestrictHi;
 }
+#endif
 
 /* ---- memory ---- */
 #ifdef RECOMP_FLAT_MEMORY
@@ -95,9 +100,21 @@ static inline void W64(uint32_t a, uint64_t v) {
 }
 static inline void WF32(uint32_t a, float v) { uint32_t b; memcpy(&b, &v, 4); W32(a, b); }
 static inline void WF64(uint32_t a, double v) { uint64_t b; memcpy(&b, &v, 8); W64(a, b); }
-/* The guest stack is private to its thread: pushes and pops stay plain. */
+/* The guest stack is private to its thread: pushes, pops and esp-relative accesses (locals, arguments) stay plain. */
 static inline void StackW32(uint32_t a, uint32_t v) { memcpy(G(a), &v, 4); }
 static inline uint32_t StackR32(uint32_t a) { uint32_t v; memcpy(&v, G(a), 4); return v; }
+static inline uint8_t SR8(uint32_t a) { return *G(a); }
+static inline uint16_t SR16(uint32_t a) { uint16_t v; memcpy(&v, G(a), 2); return v; }
+static inline uint32_t SR32(uint32_t a) { uint32_t v; memcpy(&v, G(a), 4); return v; }
+static inline uint64_t SR64(uint32_t a) { uint64_t v; memcpy(&v, G(a), 8); return v; }
+static inline float SRF32(uint32_t a) { float v; memcpy(&v, G(a), 4); return v; }
+static inline double SRF64(uint32_t a) { double v; memcpy(&v, G(a), 8); return v; }
+static inline void SW8(uint32_t a, uint8_t v) { *G(a) = v; }
+static inline void SW16(uint32_t a, uint16_t v) { memcpy(G(a), &v, 2); }
+static inline void SW32(uint32_t a, uint32_t v) { memcpy(G(a), &v, 4); }
+static inline void SW64(uint32_t a, uint64_t v) { memcpy(G(a), &v, 8); }
+static inline void SWF32(uint32_t a, float v) { memcpy(G(a), &v, 4); }
+static inline void SWF64(uint32_t a, double v) { memcpy(G(a), &v, 8); }
 #else
 static inline uint8_t R8(uint32_t a) { return *G(a); }
 static inline uint16_t R16(uint32_t a) { uint16_t v; memcpy(&v, G(a), 2); return v; }
@@ -114,6 +131,18 @@ static inline void WF64(uint32_t a, double v) { memcpy(G(a), &v, 8); }
 
 #define StackW32 W32
 #define StackR32 R32
+#define SR8 R8
+#define SR16 R16
+#define SR32 R32
+#define SR64 R64
+#define SRF32 RF32
+#define SRF64 RF64
+#define SW8 W8
+#define SW16 W16
+#define SW32 W32
+#define SW64 W64
+#define SWF32 WF32
+#define SWF64 WF64
 #endif
 
 static inline void Push32(Ctx* c, uint32_t v) { c->esp -= 4; StackW32(c->esp, v); }

@@ -249,7 +249,9 @@ def _wrap_calls(line):
 
 
 _XMM_RE = re.compile(r"c->xmm\[(\d)\]")
-_X87_CALLS = [("X87(c, ", "X87L("), ("X87Push(c, ", "X87PushL(r_st, &r_top, "), ("X87Pop(c)", "X87PopL(&r_top)"),
+_STACK_ACCESS_RE = re.compile(r"\b(R8|R16|R32|R64|RF32|RF64|W8|W16|W32|W64|WF32|WF64)\(\(uint32_t\)\(r_esp(?: \+ 0x[0-9a-f]+u)?\)")
+_X87_CALLS = [("X87Precision(c, ", "X87PrecisionCW(r_cw, "), ("c->fpu_cw = ", "r_cw = c->fpu_cw = "),
+              ("X87(c, ", "X87L("), ("X87Push(c, ", "X87PushL(r_st, &r_top, "), ("X87Pop(c)", "X87PopL(&r_top)"),
               ("X87StatusWord(c)", "X87StatusWordL(c, r_top)"), ("c->st_top", "r_top"), ("c->st[", "r_st[")]
 
 
@@ -257,14 +259,16 @@ def vector_state(body):
     """XMM registers and x87 use of a function body: they get local copies too, spilled and reloaded with the
     general registers. Returns (declarations, spill expressions, reload expressions)."""
     xmms = sorted(set(_XMM_RE.findall(body)))
-    x87 = any(k in body for k in ("X87(c, ", "X87Push(c, ", "X87Pop(c)", "X87StatusWord(c)", "c->st_top", "c->st["))
+    x87 = any(k in body for k in ("X87(c, ", "X87Push(c, ", "X87Pop(c)", "X87StatusWord(c)", "c->st_top", "c->st[",
+                                  "X87Precision(c, ", "c->fpu_cw = "))
     decl = [f"XmmValue r_xmm{n} = c->xmm[{n}];" for n in xmms]
     spill = [f"c->xmm[{n}] = r_xmm{n}" for n in xmms]
     reload = [f"r_xmm{n} = c->xmm[{n}]" for n in xmms]
     if x87:
-        decl.append("double r_st[8]; memcpy(r_st, c->st, sizeof r_st); uint32_t r_top = c->st_top;")
-        spill += ["memcpy(c->st, r_st, sizeof r_st)", "c->st_top = r_top"]
-        reload += ["memcpy(r_st, c->st, sizeof r_st)", "r_top = c->st_top"]
+        decl.append("double r_st[8]; memcpy(r_st, c->st, sizeof r_st); uint32_t r_top = c->st_top; "
+                    "uint16_t r_cw = c->fpu_cw;")
+        spill += ["memcpy(c->st, r_st, sizeof r_st)", "c->st_top = r_top"]  # r_cw is written through
+        reload += ["memcpy(r_st, c->st, sizeof r_st)", "r_top = c->st_top", "r_cw = c->fpu_cw"]
     return decl, spill, reload, x87
 
 
@@ -285,6 +289,8 @@ def localize(line, x87=False):
     for old, new in _FLAG_CALLS:
         line = line.replace(old, new)
     line = line.replace("Push32(c, ", "LPush32(&r_esp, ").replace("Pop32(c)", "LPop32(&r_esp)")
+    # esp-relative memory is the thread's own stack: no TSO ordering needed.
+    line = _STACK_ACCESS_RE.sub(lambda m: "S" + m.group(0), line)
     line = _wrap_calls(line)
     return re.sub(r"\breturn;", "{ RSPILL; return; }", line)
 

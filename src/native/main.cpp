@@ -7,6 +7,7 @@
 //   EngineTerminate()
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_main.h>  // Android: main() becomes SDL_main, called by SDLActivity
+#include <sched.h>
 #include <unistd.h>
 #ifdef __ANDROID__
 #include <android/log.h>
@@ -107,6 +108,38 @@ extern "C" JNIEXPORT void JNICALL Java_com_protore_game_TouchControls_nativeSetF
     native::g_fps_limit.store(fps);
 }
 #endif
+
+// big.LITTLE: keep the engine's main thread on the fast cores (cpu_capacity >= half of the largest). The scheduler
+// usually gets there by itself, but a frame-bound thread that waits on the GPU looks idle to it now and then and
+// lands on a small core for a while. Setting big_cores (Android default 1).
+static void PinToBigCores() {
+#ifdef __ANDROID__
+    if (!native::SettingInt("big_cores", 1)) return;
+    int caps[64] = {}, max_cap = 0, n = 0;
+    for (; n < 64; ++n) {
+        char path[96];
+        snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%d/cpu_capacity", n);
+        FILE* f = fopen(path, "r");
+        if (!f) break;
+        if (fscanf(f, "%d", &caps[n]) != 1) caps[n] = 0;
+        fclose(f);
+        if (caps[n] > max_cap) max_cap = caps[n];
+    }
+    if (n == 0 || max_cap == 0) return;
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    int big = 0;
+    for (int i = 0; i < n; ++i) {
+        if (caps[i] * 2 >= max_cap) {
+            CPU_SET(i, &set);
+            ++big;
+        }
+    }
+    if (big == 0 || big == n) return;  // not big.LITTLE
+    int r = sched_setaffinity(0, sizeof(set), &set);
+    native::Log("main thread pinned to %d of %d cores%s", big, n, r == 0 ? "" : " (failed)");
+#endif
+}
 
 using namespace native;
 
@@ -245,6 +278,7 @@ int main(int argc, char** argv) {
     }
     static std::atomic<uint64_t> frames{0};
     StartWatchdog(&frames);
+    PinToBigCores();
     g_fps_limit.store(SettingInt("fps_limit", 0));
     using Clock = std::chrono::steady_clock;
     Clock::time_point stats_start = Clock::now(), frame_start = stats_start, next_log = stats_start;
