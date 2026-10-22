@@ -1,7 +1,12 @@
 // XInput 1.3 for the native host on SDL game controllers (any pad SDL knows: Xbox, PlayStation, Android
-// Bluetooth pads). Pads are given XInput slots 0..3 in the order they are first seen.
+// Bluetooth pads). Pads are given XInput slots 0..3 in the order they are first seen. On Android the on-screen
+// controls can also act as a pad (TouchControls.nativePad): it answers as slot 0 while no real pad holds it.
 #include <SDL2/SDL.h>
+#ifdef __ANDROID__
+#include <jni.h>
+#endif
 
+#include <atomic>
 #include <cstring>
 #include <mutex>
 
@@ -16,6 +21,14 @@ constexpr uint32_t kNotConnected = 1167;  // ERROR_DEVICE_NOT_CONNECTED
 std::mutex g_mutex;
 SDL_GameController* g_pads[4] = {};
 uint32_t g_packet = 0;
+
+// The on-screen pad: XINPUT_GAMEPAD fields, written by the UI thread.
+struct TouchPad {
+    std::atomic<bool> active{false};
+    std::atomic<uint16_t> buttons{0};
+    std::atomic<uint8_t> lt{0}, rt{0};
+    std::atomic<int16_t> lx{0}, ly{0}, rx{0}, ry{0};
+} g_touch;
 
 // Fills free slots with controllers that are not assigned yet and drops detached ones.
 SDL_GameController* Pad(uint32_t index) {
@@ -54,6 +67,19 @@ void x_XInputGetState(Ctx* c) {
     // sThumbRX, sThumbRY}
     std::lock_guard<std::mutex> lock(g_mutex);
     SDL_GameController* p = Pad(Arg(c, 0));
+    if (!p && Arg(c, 0) == 0 && g_touch.active.load()) {
+        uint32_t s = Arg(c, 1);
+        W32(s, ++g_packet);
+        W16(s + 4, g_touch.buttons.load());
+        W8(s + 6, g_touch.lt.load());
+        W8(s + 7, g_touch.rt.load());
+        W16(s + 8, uint16_t(g_touch.lx.load()));
+        W16(s + 10, uint16_t(g_touch.ly.load()));
+        W16(s + 12, uint16_t(g_touch.rx.load()));
+        W16(s + 14, uint16_t(g_touch.ry.load()));
+        Return(c, 0, 2);
+        return;
+    }
     if (!p) {
         Return(c, kNotConnected, 2);
         return;
@@ -91,7 +117,7 @@ void x_XInputSetState(Ctx* c) {
     std::lock_guard<std::mutex> lock(g_mutex);
     SDL_GameController* p = Pad(Arg(c, 0));
     if (!p) {
-        Return(c, kNotConnected, 2);
+        Return(c, Arg(c, 0) == 0 && g_touch.active.load() ? 0 : kNotConnected, 2);
         return;
     }
     SDL_GameControllerRumble(p, R16(Arg(c, 1)), R16(Arg(c, 1) + 2), 1000);
@@ -101,7 +127,7 @@ void x_XInputSetState(Ctx* c) {
 void x_XInputGetCapabilities(Ctx* c) {
     // XINPUT_CAPABILITIES: Type, SubType, Flags, XINPUT_GAMEPAD Gamepad, XINPUT_VIBRATION Vibration
     std::lock_guard<std::mutex> lock(g_mutex);
-    if (!Pad(Arg(c, 0))) {
+    if (!Pad(Arg(c, 0)) && !(Arg(c, 0) == 0 && g_touch.active.load())) {
         Return(c, kNotConnected, 3);
         return;
     }
@@ -128,5 +154,22 @@ const ImportDef kXInput[] = {
 ImportRegistrar g_xinput(kXInput);
 
 }  // namespace
+
+#ifdef __ANDROID__
+// TouchControls: the on-screen pad's state (XInput layout: buttons mask, triggers 0..255, sticks with up positive);
+// active false hands slot 0 back to "not connected".
+extern "C" JNIEXPORT void JNICALL Java_com_protore_game_TouchControls_nativePad(JNIEnv*, jclass, jboolean active,
+                                                                               jint buttons, jint lt, jint rt,
+                                                                               jint lx, jint ly, jint rx, jint ry) {
+    g_touch.buttons = uint16_t(buttons);
+    g_touch.lt = uint8_t(lt);
+    g_touch.rt = uint8_t(rt);
+    g_touch.lx = int16_t(lx);
+    g_touch.ly = int16_t(ly);
+    g_touch.rx = int16_t(rx);
+    g_touch.ry = int16_t(ry);
+    g_touch.active = active != 0;
+}
+#endif
 
 }  // namespace native

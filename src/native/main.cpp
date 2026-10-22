@@ -71,6 +71,7 @@ uint32_t HostWindow();  // user32.cpp
 void InitClientSize(int window_w, int window_h);
 void StartWatchdog(std::atomic<uint64_t>* frames);  // watchdog.cpp
 void InitD3D9Bridge();  // d3d9.cpp
+void SelectVulkanDriver();  // vulkan_driver.cpp
 void InitInput(uint32_t keyboard_service, uint32_t mouse_service);  // input.cpp
 void ForwardInput(const SDL_Event& e);
 void InjectKey(SDL_Scancode sc, bool down);
@@ -208,6 +209,7 @@ int main(int argc, char** argv) {
     AttachThread(8u << 20);
     InitD3D9Bridge();
     setenv("DXVK_WSI_DRIVER", "SDL2", 0);  // DXVK native: the HWNDs we pass are SDL windows
+    SelectVulkanDriver();  // Adreno: the bundled Turnip driver
     if (SettingInt("present_stats", 0)) setenv("DXVK_PRESENT_STATS", "1", 0);  // Present timing in the DXVK log
     // dxvk_config = d3d9.presentInterval = 1, d3d9.numBackBuffers = 3  (DXVK options; ',' as ';' starts an ini
     // comment)

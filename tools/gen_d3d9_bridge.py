@@ -20,7 +20,8 @@ INTERFACES = ["IDirect3D9", "IDirect3DDevice9", "IDirect3DSwapChain9", "IDirect3
 
 MANUAL = {
     "IDirect3D9::CreateDevice", "IDirect3D9::GetAdapterMonitor",
-    "IDirect3DDevice9::Reset", "IDirect3DDevice9::Present", "IDirect3DDevice9::TestCooperativeLevel", "IDirect3DDevice9::GetCreationParameters",
+    "IDirect3DDevice9::Reset", "IDirect3DDevice9::Present", "IDirect3DDevice9::TestCooperativeLevel",
+    "IDirect3DDevice9::SetSamplerState", "IDirect3DDevice9::GetCreationParameters",
     "IDirect3DDevice9::CreateAdditionalSwapChain", "IDirect3DDevice9::SetCursorProperties",
     "IDirect3DSwapChain9::Present", "IDirect3DSwapChain9::GetPresentParameters",
     "IDirect3DSurface9::LockRect", "IDirect3DSurface9::UnlockRect", "IDirect3DSurface9::GetDC",

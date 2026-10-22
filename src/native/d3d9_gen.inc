@@ -121,7 +121,8 @@ static void h_IDirect3DDevice9_SetTexture(Ctx* c) { auto r = Host<IDirect3DDevic
 static void h_IDirect3DDevice9_GetTextureStageState(Ctx* c) { auto r = Host<IDirect3DDevice9>(Arg(c, 0))->GetTextureStageState((DWORD)Arg(c, 1), (D3DTEXTURESTAGESTATETYPE)Arg(c, 2), reinterpret_cast<DWORD*>(Ptr<void>(Arg(c, 3))));  Return(c, (uint32_t)r, 4); }
 static void h_IDirect3DDevice9_SetTextureStageState(Ctx* c) { auto r = Host<IDirect3DDevice9>(Arg(c, 0))->SetTextureStageState((DWORD)Arg(c, 1), (D3DTEXTURESTAGESTATETYPE)Arg(c, 2), (DWORD)Arg(c, 3));  Return(c, (uint32_t)r, 4); }
 static void h_IDirect3DDevice9_GetSamplerState(Ctx* c) { auto r = Host<IDirect3DDevice9>(Arg(c, 0))->GetSamplerState((DWORD)Arg(c, 1), (D3DSAMPLERSTATETYPE)Arg(c, 2), reinterpret_cast<DWORD*>(Ptr<void>(Arg(c, 3))));  Return(c, (uint32_t)r, 4); }
-static void h_IDirect3DDevice9_SetSamplerState(Ctx* c) { auto r = Host<IDirect3DDevice9>(Arg(c, 0))->SetSamplerState((DWORD)Arg(c, 1), (D3DSAMPLERSTATETYPE)Arg(c, 2), (DWORD)Arg(c, 3));  Return(c, (uint32_t)r, 4); }
+void Manual_IDirect3DDevice9_SetSamplerState(Ctx* c);
+static void h_IDirect3DDevice9_SetSamplerState(Ctx* c) { Manual_IDirect3DDevice9_SetSamplerState(c); }
 static void h_IDirect3DDevice9_ValidateDevice(Ctx* c) { auto r = Host<IDirect3DDevice9>(Arg(c, 0))->ValidateDevice(reinterpret_cast<DWORD*>(Ptr<void>(Arg(c, 1))));  Return(c, (uint32_t)r, 2); }
 static void h_IDirect3DDevice9_SetPaletteEntries(Ctx* c) { auto r = Host<IDirect3DDevice9>(Arg(c, 0))->SetPaletteEntries((UINT)Arg(c, 1), reinterpret_cast<const PALETTEENTRY *>(Ptr<void>(Arg(c, 2))));  Return(c, (uint32_t)r, 3); }
 static void h_IDirect3DDevice9_GetPaletteEntries(Ctx* c) { auto r = Host<IDirect3DDevice9>(Arg(c, 0))->GetPaletteEntries((UINT)Arg(c, 1), reinterpret_cast<PALETTEENTRY*>(Ptr<void>(Arg(c, 2))));  Return(c, (uint32_t)r, 3); }

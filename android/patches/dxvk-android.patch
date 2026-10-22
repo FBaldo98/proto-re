@@ -642,6 +642,34 @@ index 27d6bb1..922f178 100644
  
      return status;
    }
+diff --git a/src/vulkan/vulkan_loader.cpp b/src/vulkan/vulkan_loader.cpp
+index 17e9b62..198b7b3 100644
+--- a/src/vulkan/vulkan_loader.cpp
++++ b/src/vulkan/vulkan_loader.cpp
+@@ -1,3 +1,4 @@
++#include <cstdlib>
+ #include <tuple>
+ 
+ #include "vulkan_loader.h"
+@@ -10,6 +11,18 @@
+ namespace dxvk::vk {
+ 
+   static std::pair<HMODULE, PFN_vkGetInstanceProcAddr> loadVulkanLibrary() {
++#ifdef __ANDROID__
++    // Android port: the host may have loaded a bundled driver (Turnip via adrenotools on Adreno) and passes its
++    // vkGetInstanceProcAddr as a hex address.
++    if (const char* gipa = std::getenv("DXVK_VK_GIPA")) {
++      auto proc = reinterpret_cast<PFN_vkGetInstanceProcAddr>(std::strtoull(gipa, nullptr, 16));
++      if (proc) {
++        Logger::info(str::format("Vulkan: using the host's vkGetInstanceProcAddr @ ", gipa));
++        return std::make_pair(HMODULE(nullptr), proc);
++      }
++    }
++#endif
++
+     static const std::array<const char*, 2> dllNames = {{
+ #ifdef _WIN32
+       "winevulkan.dll",
 diff --git a/src/wsi/sdl2/wsi_platform_sdl2.cpp b/src/wsi/sdl2/wsi_platform_sdl2.cpp
 index 203cb6d..d8c0255 100644
 --- a/src/wsi/sdl2/wsi_platform_sdl2.cpp
@@ -655,3 +683,71 @@ index 203cb6d..d8c0255 100644
  #else
          "libSDL2-2.0.so.0"
  #endif
+diff --git a/src/wsi/sdl2/wsi_platform_sdl2.h b/src/wsi/sdl2/wsi_platform_sdl2.h
+index 44f8836..b1c1a99 100644
+--- a/src/wsi/sdl2/wsi_platform_sdl2.h
++++ b/src/wsi/sdl2/wsi_platform_sdl2.h
+@@ -1,6 +1,9 @@
+ #pragma once
+ 
+ #include <SDL.h>
++#ifdef __ANDROID__
++#include <SDL_syswm.h>
++#endif
+ 
+ #include "../wsi_platform.h"
+ 
+diff --git a/src/wsi/sdl2/wsi_platform_sdl2_funcs.h b/src/wsi/sdl2/wsi_platform_sdl2_funcs.h
+index 4396a6b..66af04f 100644
+--- a/src/wsi/sdl2/wsi_platform_sdl2_funcs.h
++++ b/src/wsi/sdl2/wsi_platform_sdl2_funcs.h
+@@ -14,4 +14,7 @@ SDL_PROC(void, SDL_SetWindowSize, (SDL_Window*, int, int))
+ SDL_PROC(SDL_bool, SDL_Vulkan_CreateSurface, (SDL_Window*, VkInstance, VkSurfaceKHR*))
+ SDL_PROC(SDL_bool, SDL_Vulkan_GetInstanceExtensions, (SDL_Window*, unsigned int*, const char**))
+ SDL_PROC(int, SDL_Vulkan_LoadLibrary, (const char*))
++#ifdef __ANDROID__
++SDL_PROC(SDL_bool, SDL_GetWindowWMInfo, (SDL_Window*, SDL_SysWMinfo*))
++#endif
+ #undef SDL_PROC
+diff --git a/src/wsi/sdl2/wsi_window_sdl2.cpp b/src/wsi/sdl2/wsi_window_sdl2.cpp
+index e0c48fd..a1999dd 100644
+--- a/src/wsi/sdl2/wsi_window_sdl2.cpp
++++ b/src/wsi/sdl2/wsi_window_sdl2.cpp
+@@ -10,6 +10,10 @@
+ 
+ #include <windows.h>
+ #include <SDL_vulkan.h>
++#ifdef __ANDROID__
++#include <android/native_window.h>
++#include <vulkan/vulkan_android.h>
++#endif
+ 
+ namespace dxvk::wsi {
+ 
+@@ -163,9 +167,26 @@ namespace dxvk::wsi {
+           VkSurfaceKHR*             pSurface) {
+     SDL_Window* window = fromHwnd(hWindow);
+ 
++#ifdef __ANDROID__
++    // Android port: create the surface through the instance's own vkGetInstanceProcAddr. The Vulkan library may
++    // be a bundled driver (Turnip, loaded by the host through adrenotools) that SDL knows nothing about; and a
++    // window whose surface Android has destroyed yields an error instead of a crash in the loader.
++    SDL_SysWMinfo info;
++    SDL_VERSION(&info.version);
++    if (!SDL_GetWindowWMInfo(window, &info) || !info.info.android.window)
++      return VK_ERROR_SURFACE_LOST_KHR;
++    auto create = reinterpret_cast<PFN_vkCreateAndroidSurfaceKHR>(
++      pfnVkGetInstanceProcAddr(instance, "vkCreateAndroidSurfaceKHR"));
++    if (!create)
++      return VK_ERROR_EXTENSION_NOT_PRESENT;
++    VkAndroidSurfaceCreateInfoKHR ci = { VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR };
++    ci.window = info.info.android.window;
++    return create(instance, &ci, nullptr, pSurface);
++#else
+     return SDL_Vulkan_CreateSurface(window, instance, pSurface)
+          ? VK_SUCCESS
+          : VK_ERROR_OUT_OF_HOST_MEMORY;
++#endif
+   }
+ 
+ }

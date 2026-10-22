@@ -37,6 +37,13 @@ TSO ?= 1
 RECOMP_EXTRA := $(if $(filter 1,$(TSO)),-DRECOMP_TSO)
 DEP_INCLUDES := -I$(DEPS)/include
 LDFLAGS := -shared -Wl,-Bsymbolic -static-libstdc++ -Wl,--no-undefined -L$(DEPS)/lib -ldxvk_d3d9 -lFAudio -lSDL2 -llog -landroid
+# Adreno: Turnip and libadrenotools from android/build-turnip.sh (arm64 only; built without them otherwise).
+TURNIP ?= $(HOME)/proto-re-data/android-turnip
+ifneq ($(and $(filter arm64-v8a,$(ABI)),$(wildcard $(TURNIP)/lib/libadrenotools.a)),)
+DEP_INCLUDES += -I$(TURNIP)/include -DPROTORE_ADRENOTOOLS
+LDFLAGS += -L$(TURNIP)/lib -ladrenotools -llinkernsbypass -ldl \
+           -Wl,--defsym=android_get_device_api_level=protore_device_api_level
+endif
 BINARY := libmain.so
 else
 CXX ?= g++
@@ -54,7 +61,8 @@ BINARY := proto-native
 endif
 
 SRCS := main.cpp memory.cpp loader.cpp imports.cpp runtime.cpp thread.cpp kernel32.cpp msvcr80.cpp user32.cpp \
-        advapi32.cpp misc.cpp d3d9.cpp input.cpp xaudio2.cpp bink.cpp dinput.cpp gamepad.cpp config.cpp watchdog.cpp hot_audio.cpp hot_skin.cpp
+        advapi32.cpp misc.cpp d3d9.cpp input.cpp xaudio2.cpp bink.cpp dinput.cpp gamepad.cpp config.cpp watchdog.cpp hot_audio.cpp hot_skin.cpp \
+        vulkan_driver.cpp
 GEN := $(wildcard $(RECOMP_DIR)/*.c)
 OBJS = $(SRCS:%.cpp=$(OUT)/%.o) $(GEN:$(RECOMP_DIR)/%.c=$(OUT)/gen/%.o)
 

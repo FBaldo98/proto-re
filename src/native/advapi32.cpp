@@ -94,6 +94,8 @@ A(RegQueryValueExA) {
     std::string path = RootName(Arg(c, 0));
     std::string name = Arg(c, 1) ? Lower(Str(Arg(c, 1))) : "";
     uint32_t type_out = Arg(c, 3), data = Arg(c, 4), size_out = Arg(c, 5);
+    static const bool trace = SettingInt("trace_registry", 0) != 0;
+    if (trace) Log("RegQueryValueExA(%s\\%s)", path.c_str(), name.c_str());
     std::lock_guard<std::mutex> lock(g_mutex);
     auto k = g_keys.find(path);
     if (k == g_keys.end() || !k->second.count(name)) {
@@ -117,6 +119,9 @@ A(RegQueryValueExA) {
 A(RegSetValueExA) {
     std::string path = RootName(Arg(c, 0));
     std::string name = Arg(c, 1) ? Lower(Str(Arg(c, 1))) : "";
+    static const bool trace = SettingInt("trace_registry", 0) != 0;
+    if (trace) Log("RegSetValueExA(%s\\%s, type %u, %u bytes, dword %u)", path.c_str(), name.c_str(), Arg(c, 3),
+                   Arg(c, 5), Arg(c, 5) >= 4 ? R32(Arg(c, 4)) : 0);
     std::lock_guard<std::mutex> lock(g_mutex);
     g_keys[path][name] = Value{Arg(c, 3), std::string(Str(Arg(c, 4)), Arg(c, 5))};
     Return(c, 0, 6);

@@ -12,6 +12,7 @@ SDK=${ANDROID_HOME:-$HOME/Android/Sdk}
 BUILD_TOOLS=${BUILD_TOOLS:-$SDK/build-tools/36.0.0}
 PLATFORM_JAR=${PLATFORM_JAR:-$SDK/platforms/android-35/android.jar}
 DEPS_ROOT=${DEPS_ROOT:-$HOME/proto-re-data/android-deps}
+TURNIP_ROOT=${TURNIP_ROOT:-$HOME/proto-re-data/android-turnip}
 SDL_SRC=${SDL_SRC:-$HOME/proto-re-data/android-deps-src/SDL2}
 KEYSTORE=${KEYSTORE:-$HOME/.android/debug.keystore}
 ABIS=("${@:-arm64-v8a}")
@@ -35,6 +36,10 @@ cp "$OUT/dex/classes.dex" "$OUT/pkg/"
 for abi in "${ABIS[@]}"; do
     mkdir -p "$OUT/pkg/lib/$abi"
     cp "$ROOT/build/android/$abi/libmain.so" "$DEPS_ROOT/$abi"/lib/lib{SDL2,FAudio,dxvk_d3d9}.so "$OUT/pkg/lib/$abi/"
+    # Adreno: Turnip and the adrenotools hooks (android/build-turnip.sh), when built
+    if [ "$abi" = arm64-v8a ] && [ -e "$TURNIP_ROOT/lib/libvulkan_freedreno.so" ]; then
+        cp "$TURNIP_ROOT"/lib/*.so "$OUT/pkg/lib/$abi/"
+    fi
     "$SDK"/ndk/*/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip --strip-unneeded "$OUT/pkg/lib/$abi"/*.so
 done
 (cd "$OUT/pkg" && zip -q -r "$OUT/base.apk" classes.dex lib)

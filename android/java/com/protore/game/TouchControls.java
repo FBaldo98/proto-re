@@ -50,18 +50,26 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
     static native float nativeFrameMs();
     static native int nativeMemoryMiB();
     static native void nativeSetFpsLimit(int fps);
+    // The on-screen pad (gamepad.cpp): XInput buttons mask, triggers 0..255, sticks -32768..32767 with up positive.
+    static native void nativePad(boolean active, int buttons, int lt, int rt, int lx, int ly, int rx, int ry);
 
     private static final int MOUSE_LEFT = 1, MOUSE_RIGHT = 2, MOUSE_MIDDLE = 4;
+    // XInput buttons; the triggers get bits above the mask
+    private static final int PAD_START = 0x0010, PAD_RS = 0x0080, PAD_LB = 0x0100, PAD_RB = 0x0200, PAD_A = 0x1000,
+            PAD_B = 0x2000, PAD_X = 0x4000, PAD_Y = 0x8000, PAD_LT = 0x10000, PAD_RT = 0x20000;
     private static final int RED = 0xffe0261e, RED_DIM = 0xff7a1410, INK = 0xff0b0b0b;
 
     /**
-     * A hexagonal button: a key (Android keycode) or a mouse button. Its default place is a dp offset from a corner
-     * (right/bottom when the flags say so), scaled with the buttons so a cluster stays tight; the layout editor
-     * replaces it with a position in fractions of the view.
+     * A hexagonal button: a key (Android keycode) or a mouse button, and a pad button for the gamepad input mode
+     * (labelled with the pad's letter, as the game's prompts name it). Its default place is a dp offset from a
+     * corner (right/bottom when the flags say so), scaled with the buttons so a cluster stays tight; the layout
+     * editor replaces it with a position in fractions of the view.
      */
     private static final class Button {
         final String label;
         final int keycode, mouseButton;
+        int padBit;
+        String padLabel;
         final boolean fromRight, fromBottom;
         final float dx, dy, sizeDp;
         final boolean gameOnly;
@@ -82,6 +90,12 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
             this.gameOnly = gameOnly;
         }
 
+        Button pad(int bit, String letter) {
+            padBit = bit;
+            padLabel = letter;
+            return this;
+        }
+
         boolean hit(float x, float y) {
             float dx = x - cx, dy = y - cy;
             return dx * dx + dy * dy <= r * r * 1.25f;
@@ -94,19 +108,24 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
     private final Button[] buttons = {
         new Button("ENTER", KeyEvent.KEYCODE_ENTER, 0, true, 280, false, 33, 24, false),
         new Button("ESC", KeyEvent.KEYCODE_ESCAPE, 0, true, 100, false, 33, 24, false),
-        new Button("УДАР", 0, MOUSE_LEFT, true, 78, true, 74, 46, true),
-        new Button("СПЕЦ", 0, MOUSE_RIGHT, true, 183, true, 62, 33, true),
-        new Button("ЗАХВАТ", KeyEvent.KEYCODE_E, 0, true, 158, true, 150, 31, true),
-        new Button("ПРЫЖОК", KeyEvent.KEYCODE_SPACE, 0, true, 66, true, 180, 33, true),
-        new Button("ЦЕЛЬ", KeyEvent.KEYCODE_TAB, 0, true, 258, true, 140, 27, true),  // lock-on is Tab on PC
-        new Button("БЕГ", KeyEvent.KEYCODE_SHIFT_LEFT, 0, true, 168, true, 245, 27, true),
-        new Button("СИЛЫ", 0, MOUSE_MIDDLE, true, 190, false, 33, 24, true),  // power wheel: middle button
+        new Button("УДАР", 0, MOUSE_LEFT, true, 78, true, 74, 46, true).pad(PAD_X, "X"),
+        new Button("СПЕЦ", 0, MOUSE_RIGHT, true, 183, true, 62, 33, true).pad(PAD_Y, "Y"),
+        new Button("ЗАХВАТ", KeyEvent.KEYCODE_E, 0, true, 158, true, 150, 31, true).pad(PAD_B, "B"),
+        new Button("ПРЫЖОК", KeyEvent.KEYCODE_SPACE, 0, true, 66, true, 180, 33, true).pad(PAD_A, "A"),
+        // lock-on is Tab on PC
+        new Button("ЦЕЛЬ", KeyEvent.KEYCODE_TAB, 0, true, 258, true, 140, 27, true).pad(PAD_LT, "LT"),
+        new Button("БЕГ", KeyEvent.KEYCODE_SHIFT_LEFT, 0, true, 168, true, 245, 27, true).pad(PAD_RT, "RT"),
+        // power wheel: middle button on PC
+        new Button("СИЛЫ", 0, MOUSE_MIDDLE, true, 190, false, 33, 24, true).pad(PAD_LB, "LB"),
+        // disguise actions: pad only
+        new Button("МАСКА", 0, 0, true, 370, false, 33, 24, true).pad(PAD_RB, "RB"),
     };
 
     // ---- settings ----
     private final SharedPreferences prefs;
     private float opacity, scale;
-    private boolean vibrate, showFps, hideWithPad, autoRun;
+    private boolean vibrate, showFps, hideWithPad, autoRun, padInput, invertY;
+    private float camGain;
     private boolean padConnected;
 
     private static final class Setting {
@@ -144,8 +163,12 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
         new Setting("Показ FPS", "ui_fps", new String[] {"Выкл", "Вкл"}, new int[] {0, 1}, false),
         new Setting("Скрывать при геймпаде", "ui_hide_pad", new String[] {"Выкл", "Вкл"}, new int[] {0, 1}, false),
         new Setting("Бег стиком до края", "ui_stick_run", new String[] {"Выкл", "Вкл"}, new int[] {0, 1}, false),
+        new Setting("Ввод в игре", "ui_input", new String[] {"Геймпад", "Клав+мышь"}, new int[] {1, 0}, false),
+        new Setting("Камера", "ui_cam", new String[] {"50%", "75%", "100%", "150%", "200%"},
+                new int[] {50, 75, 100, 150, 200}, false),
+        new Setting("Инверсия Y", "ui_invert", new String[] {"Выкл", "Вкл"}, new int[] {0, 1}, false),
     };
-    private static final int[] DEFAULTS = {1, 1, 0, 2, 1, 1, 0, 1, 0};
+    private static final int[] DEFAULTS = {1, 1, 0, 2, 1, 1, 0, 1, 0, 0, 2, 0};
     private boolean panelOpen = false, restartNeeded = false;
     private final RectF panel = new RectF(), restartRect = new RectF(), closeRect = new RectF(),
             layoutRect = new RectF();
@@ -174,6 +197,15 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
     private int stickPointer = -1;
     private final boolean[] dirDown = new boolean[4];  // W A S D
     private boolean stickRun, runButtonHeld, shiftDown;  // Shift comes from the rim of the stick or БЕГ
+
+    // on-screen pad state (gamepad input mode)
+    private int padButtons;
+    private int padLX, padLY, padRX, padRY;
+    private long lastLookTap;
+    private final Runnable lookStop = () -> {
+        padRX = padRY = 0;
+        sendPad();
+    };
     private static final int[] DIR_KEYS = {KeyEvent.KEYCODE_W, KeyEvent.KEYCODE_A, KeyEvent.KEYCODE_S, KeyEvent.KEYCODE_D};
 
     // camera / menu pointer
@@ -251,6 +283,11 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
         showFps = settings[6].value() != 0;
         hideWithPad = settings[7].value() != 0;
         autoRun = settings[8].value() != 0;
+        boolean pad = settings[9].value() != 0;
+        if (pad != padInput) releaseAll();
+        padInput = pad;
+        camGain = settings[10].value() / 100f;
+        invertY = settings[11].value() != 0;
         layoutButtons(getWidth(), getHeight());
     }
 
@@ -343,7 +380,7 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
         stickY = knobY = stickHomeY;
         modeRect.set(14 * density, 14 * density, 110 * density, 52 * density);
         gearRect.set(w - 58 * density, 12 * density, w - 14 * density, 56 * density);
-        float pw = Math.min(w * 0.66f, 600 * density), ph = Math.min(h * 0.94f, 500 * density);
+        float pw = Math.min(w * 0.92f, 860 * density), ph = Math.min(h * 0.94f, 500 * density);
         panel.set((w - pw) / 2, (h - ph) / 2, (w + pw) / 2, (h + ph) / 2);
     }
 
@@ -389,11 +426,32 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
         if (vibrate) performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
     }
 
+    private boolean padMode() {
+        return gameMode && padInput;
+    }
+
+    private void sendPad() {
+        boolean active = padMode() && !controlsHidden();
+        try {
+            nativePad(active, padButtons & 0xffff, (padButtons & PAD_LT) != 0 ? 255 : 0,
+                    (padButtons & PAD_RT) != 0 ? 255 : 0, padLX, padLY, padRX, padRY);
+        } catch (UnsatisfiedLinkError ignored) {
+            // older libmain without the pad
+        }
+    }
+
+    private static int clampAxis(float v) {
+        return Math.max(-32767, Math.min(32767, Math.round(v)));
+    }
+
     private void press(Button b, int pointer) {
         b.pointer = pointer;
         pointerButton.put(pointer, b);
         buzz();
-        if (b.mouseButton != 0) mouseButton(b.mouseButton, true, lastMouseX, lastMouseY);
+        if (padMode() && b.padBit != 0) {
+            padButtons |= b.padBit;
+            sendPad();
+        } else if (b.mouseButton != 0) mouseButton(b.mouseButton, true, lastMouseX, lastMouseY);
         else if (b.keycode == KeyEvent.KEYCODE_SHIFT_LEFT) setRun(stickRun, true);
         else key(b.keycode, true);
     }
@@ -401,7 +459,10 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
     private void release(Button b) {
         pointerButton.remove(b.pointer);
         b.pointer = -1;
-        if (b.mouseButton != 0) mouseButton(b.mouseButton, false, lastMouseX, lastMouseY);
+        if (padMode() && b.padBit != 0) {
+            padButtons &= ~b.padBit;
+            sendPad();
+        } else if (b.mouseButton != 0) mouseButton(b.mouseButton, false, lastMouseX, lastMouseY);
         else if (b.keycode == KeyEvent.KEYCODE_SHIFT_LEFT) setRun(stickRun, false);
         else key(b.keycode, false);
     }
@@ -425,6 +486,14 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
         }
         knobX = stickX + dx;
         knobY = stickY + dy;
+        if (padMode()) {  // analog: a small dead zone, full range at the rim
+            float n = len / stickR, dead = 0.12f;
+            float k = n <= dead ? 0 : (Math.min(1f, n) - dead) / (1 - dead) / Math.max(n, 1e-3f);
+            padLX = clampAxis(dx / stickR * k * 32767);
+            padLY = clampAxis(-dy / stickR * k * 32767);
+            sendPad();
+            return;
+        }
         float dead = stickR * 0.3f;
         boolean[] want = {dy < -dead, dx < -dead, dy > dead, dx > dead};
         for (int i = 0; i < 4; i++) {
@@ -449,12 +518,16 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
         for (Button b : buttons) if (b.pointer >= 0) release(b);
         if (stickPointer >= 0) releaseStick();
         setRun(false, false);
+        padButtons = padLX = padLY = padRX = padRY = 0;
+        sendPad();
         if (lookPointer >= 0 && !gameMode) mouseButton(MOUSE_LEFT, false, lookX, lookY);
         lookPointer = -1;
     }
 
     private boolean visible(Button b) {
-        return editing || (!controlsHidden() && (gameMode || !b.gameOnly));
+        if (editing) return true;
+        if (controlsHidden() || (!gameMode && b.gameOnly)) return false;
+        return padMode() || b.keycode != 0 || b.mouseButton != 0;  // pad-only buttons need the pad mode
     }
 
     // ---- layout editor ----
@@ -581,6 +654,18 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
                     lookPointer = id;
                     lookX = x;
                     lookY = y;
+                    if (padMode()) {  // double tap: camera reset (right stick click)
+                        long now = e.getEventTime();
+                        if (now - lastLookTap < 300) {
+                            padButtons |= PAD_RS;
+                            sendPad();
+                            postDelayed(() -> {
+                                padButtons &= ~PAD_RS;
+                                sendPad();
+                            }, 90);
+                        }
+                        lastLookTap = now;
+                    }
                     if (!gameMode) {
                         mouseMoveTo(x, y);
                         mouseButton(MOUSE_LEFT, true, x, y);
@@ -595,8 +680,20 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
                     if (pid == stickPointer) {
                         updateStick(px, py);
                     } else if (pid == lookPointer) {
-                        if (gameMode) mouseMoveBy((px - lookX) * 1.5f, (py - lookY) * 1.5f);
-                        else mouseMoveTo(px, py);
+                        if (padMode()) {
+                            // the drag speed deflects the right stick; it springs back when the finger rests
+                            float g = camGain * 2600f / density;
+                            padRX = clampAxis((px - lookX) * g);
+                            padRY = clampAxis((invertY ? 1 : -1) * (py - lookY) * g);
+                            sendPad();
+                            removeCallbacks(lookStop);
+                            postDelayed(lookStop, 45);
+                        } else if (gameMode) {
+                            float g = 1.5f * camGain;
+                            mouseMoveBy((px - lookX) * g, (py - lookY) * g * (invertY ? -1 : 1));
+                        } else {
+                            mouseMoveTo(px, py);
+                        }
                         lookX = px;
                         lookY = py;
                     }
@@ -616,6 +713,7 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
                     if (modeRect.contains(x, y)) {
                         releaseAll();
                         gameMode = !gameMode;
+                        sendPad();
                         buzz();
                     }
                 } else if (pointerButton.containsKey(id)) {
@@ -625,6 +723,7 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
                 } else if (id == lookPointer) {
                     lookPointer = -1;
                     if (!gameMode) mouseButton(MOUSE_LEFT, false, x, y);
+                    if (padMode()) lookStop.run();
                 }
                 break;
             case MotionEvent.ACTION_CANCEL:
@@ -735,12 +834,13 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
 
     private void drawButton(Canvas c, Button b) {
         final boolean down = b.pointer >= 0;
-        Bitmap bmp = cached(b.label + (down ? ":1:" : ":0:") + b.r, b.r + 12 * density,
-                (cc, x, y) -> paintButton(cc, b, x, y, down));
+        final String letter = padMode() ? b.padLabel : null;
+        Bitmap bmp = cached(b.label + (down ? ":1:" : ":0:") + b.r + letter, b.r + 12 * density,
+                (cc, x, y) -> paintButton(cc, b, x, y, down, letter));
         blitCentered(c, bmp, b.cx, b.cy);
     }
 
-    private void paintButton(Canvas c, Button b, float bx, float by, boolean down) {
+    private void paintButton(Canvas c, Button b, float bx, float by, boolean down, String letter) {
         hexagon(bx, by, b.r);
         fill.setStyle(Paint.Style.FILL);
         fill.setColor(alpha(down ? 0xd0b0180f : 0xa00b0b0b, 1f));
@@ -757,7 +857,17 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
         c.drawPath(path, edge);
         text.setTextSize(Math.min(14 * density, b.r * 0.42f));
         text.setColor(alpha(down ? 0xffffffff : 0xffffd6d0, 1f));
-        c.drawText(b.label, bx, by + text.getTextSize() * 0.36f, text);
+        if (letter == null) {
+            c.drawText(b.label, bx, by + text.getTextSize() * 0.36f, text);
+            return;
+        }
+        // pad mode: the pad letter the game's prompts show, the action under it
+        float size = text.getTextSize();
+        text.setTextSize(Math.min(17 * density, b.r * 0.55f));
+        c.drawText(letter, bx, by - b.r * 0.08f, text);
+        text.setTextSize(size * 0.78f);
+        text.setColor(alpha(0xffffb0a6, 1f));
+        c.drawText(b.label, bx, by + b.r * 0.45f, text);
     }
 
     private void drawStick(Canvas c) {
@@ -854,21 +964,25 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
         text.setTextSize(20 * density);
         text.setColor(RED);
         c.drawText("НАСТРОЙКИ", panel.centerX(), panel.top + 36 * density, text);
-        float rowH = (panel.height() - 116 * density) / settings.length;
+        // two columns of settings
+        int rows = (settings.length + 1) / 2;
+        float rowH = (panel.height() - 116 * density) / rows;
+        float colW = (panel.width() - pad * 3) / 2;
         float top = panel.top + 54 * density;
         leftArrows.clear();
         rightArrows.clear();
-        text.setTextSize(Math.min(15 * density, rowH * 0.45f));
+        text.setTextSize(Math.min(15 * density, rowH * 0.42f));
         for (int i = 0; i < settings.length; i++) {
             Setting s = settings[i];
-            float y = top + rowH * i + rowH / 2;
+            float colLeft = panel.left + pad + (i / rows) * (colW + pad), colRight = colLeft + colW;
+            float y = top + rowH * (i % rows) + rowH / 2;
             text.setTextAlign(Paint.Align.LEFT);
             text.setColor(0xffe8d6d4);
-            c.drawText(s.label + (s.engine && !s.key.equals("fps_limit") ? " *" : ""), panel.left + pad,
-                    y + 5 * density, text);
-            float vx = panel.right - pad - 70 * density;
-            RectF l = new RectF(vx - 70 * density, y - rowH / 2, vx - 34 * density, y + rowH / 2);
-            RectF r = new RectF(vx + 34 * density, y - rowH / 2, vx + 70 * density, y + rowH / 2);
+            c.drawText(s.label + (s.engine && !s.key.equals("fps_limit") ? " *" : ""), colLeft, y + 5 * density,
+                    text);
+            float vx = colRight - 62 * density;
+            RectF l = new RectF(vx - 64 * density, y - rowH / 2, vx - 32 * density, y + rowH / 2);
+            RectF r = new RectF(vx + 32 * density, y - rowH / 2, vx + 64 * density, y + rowH / 2);
             leftArrows.add(l);
             rightArrows.add(r);
             text.setTextAlign(Paint.Align.CENTER);
@@ -879,7 +993,7 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
             c.drawText(s.names[s.index], vx, y + 5 * density, text);
             edge.setStrokeWidth(0.6f * density);
             edge.setColor(0x40e0261e);
-            c.drawLine(panel.left + pad, y + rowH / 2, panel.right - pad, y + rowH / 2, edge);
+            c.drawLine(colLeft, y + rowH / 2, colRight, y + rowH / 2, edge);
         }
         text.setTextAlign(Paint.Align.CENTER);
         float by = panel.bottom - 36 * density, pillW = 150 * density, gap = 12 * density;

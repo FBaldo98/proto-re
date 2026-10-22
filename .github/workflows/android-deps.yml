@@ -1,10 +1,11 @@
-# Third-party native libraries of the Android port (SDL2, FAudio, DXVK d3d9), built on GitHub's runners.
+# Third-party native libraries of the Android port (SDL2, FAudio, DXVK d3d9; Turnip and libadrenotools for
+# Adreno), built on GitHub's runners.
 # Nothing here touches game files or code generated from them: the recompiled engine is built locally only.
 name: android-deps
 
 on:
   push:
-    paths: [android/build-deps.sh, .github/workflows/android-deps.yml]
+    paths: [android/build-deps.sh, android/build-turnip.sh, android/patches/**, .github/workflows/android-deps.yml]
   workflow_dispatch:
 
 jobs:
@@ -21,7 +22,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: out/${{ matrix.abi }}
-          key: android-deps-${{ matrix.abi }}-${{ hashFiles('android/build-deps.sh') }}
+          key: android-deps-${{ matrix.abi }}-${{ hashFiles('android/build-deps.sh', 'android/patches/**') }}
 
       - name: Tools
         if: steps.cache.outputs.cache-hit != 'true'
@@ -45,4 +46,39 @@ jobs:
           path: |
             out/${{ matrix.abi }}/lib/*.so
             out/${{ matrix.abi }}/include
+          retention-days: 30
+
+  turnip:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: out/turnip
+          key: android-turnip-${{ hashFiles('android/build-turnip.sh') }}
+
+      - name: Tools
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build glslang-tools bison flex python3-pip
+          pip3 install --user --break-system-packages meson==1.5.2 mako pyyaml packaging
+
+      - name: Build
+        if: steps.cache.outputs.cache-hit != 'true'
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_LATEST_HOME }}
+        run: |
+          export PATH=$HOME/.local/bin:$PATH
+          android/build-turnip.sh src out/turnip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-turnip-arm64-v8a
+          path: |
+            out/turnip/lib
+            out/turnip/include
           retention-days: 30

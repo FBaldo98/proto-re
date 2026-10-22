@@ -708,8 +708,9 @@ M(IDirect3D9, CreateDevice) {
     IDirect3DDevice9* dev = nullptr;
     HRESULT hr = Host<IDirect3D9>(Arg(c, 0))->CreateDevice(Arg(c, 1), D3DDEVTYPE(Arg(c, 2)), HostHwnd(Arg(c, 3)),
                                                          Arg(c, 4), &pp, &dev);
-    Log("CreateDevice %ux%u fmt %u windowed %u -> %08x", pp.BackBufferWidth, pp.BackBufferHeight,
-        pp.BackBufferFormat, pp.Windowed, uint32_t(hr));
+    Log("CreateDevice %ux%u fmt %u windowed %u msaa %u/%u interval %u -> %08x", pp.BackBufferWidth,
+        pp.BackBufferHeight, pp.BackBufferFormat, pp.Windowed, pp.MultiSampleType, pp.MultiSampleQuality,
+        pp.PresentationInterval, uint32_t(hr));
     if (SUCCEEDED(hr) && OverrideModes()) SetClientSize(int(pp.BackBufferWidth), int(pp.BackBufferHeight));
     ToGuest(pp, Arg(c, 5));
     W32(Arg(c, 6), SUCCEEDED(hr) ? Wrap(dev) : 0);
@@ -742,7 +743,8 @@ M(IDirect3DDevice9, Reset) {
     D3DPRESENT_PARAMETERS pp = ToHost(Arg(c, 1));
     DrainGraves(true);
     HRESULT hr = Host<IDirect3DDevice9>(Arg(c, 0))->Reset(&pp);
-    Log("Reset %ux%u -> %08x", pp.BackBufferWidth, pp.BackBufferHeight, uint32_t(hr));
+    Log("Reset %ux%u msaa %u/%u interval %u -> %08x", pp.BackBufferWidth, pp.BackBufferHeight, pp.MultiSampleType,
+        pp.MultiSampleQuality, pp.PresentationInterval, uint32_t(hr));
     if (SUCCEEDED(hr) && OverrideModes()) SetClientSize(int(pp.BackBufferWidth), int(pp.BackBufferHeight));
     ToGuest(pp, Arg(c, 1));
     Return(c, uint32_t(hr), 2);
@@ -835,6 +837,28 @@ M(IDirect3DDevice9, Present) {
     HRESULT hr =
         GuardedPresent([&] { return dev->Present(Ptr<RECT>(Arg(c, 1)), Ptr<RECT>(Arg(c, 2)), nullptr, nullptr); });
     Return(c, uint32_t(hr), 5);
+}
+// Sampler state passes through; the first 200000 calls are tallied once to log the filtering the engine asks for
+// (anisotropy and mip filtering are what a phone GPU pays for).
+M(IDirect3DDevice9, SetSamplerState) {
+    static std::atomic<uint32_t> calls{0};
+    static std::atomic<uint32_t> aniso[17], minf[4], mipf[4];
+    const DWORD type = Arg(c, 2), value = Arg(c, 3);
+    if (uint32_t n = calls.fetch_add(1); n < 200000) {
+        if (type == D3DSAMP_MAXANISOTROPY) ++aniso[value > 16 ? 16 : value];
+        if (type == D3DSAMP_MINFILTER) ++minf[value & 3];
+        if (type == D3DSAMP_MIPFILTER) ++mipf[value & 3];
+        if (n == 199999) {
+            std::string a;
+            for (int i = 0; i <= 16; ++i)
+                if (aniso[i]) a += " " + std::to_string(i) + "x:" + std::to_string(aniso[i].load());
+            Log("samplers: max anisotropy%s | min filter none/point/linear/aniso %u/%u/%u/%u | mip %u/%u/%u/%u",
+                a.c_str(), minf[0].load(), minf[1].load(), minf[2].load(), minf[3].load(), mipf[0].load(),
+                mipf[1].load(), mipf[2].load(), mipf[3].load());
+        }
+    }
+    Return(c, uint32_t(Host<IDirect3DDevice9>(Arg(c, 0))->SetSamplerState(Arg(c, 1), D3DSAMPLERSTATETYPE(type),
+                                                                          value)), 4);
 }
 // The engine's worker threads poll this before every buffer lock; DXVK answers D3D_OK for a windowed device but
 // takes the device lock first, so the polls queue up behind the render thread's draws and presents.
