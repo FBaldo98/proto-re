@@ -27,6 +27,7 @@ BASE = 0x10000000  # the DLL's preferred base; --base rebases everything (rebase
 ORIG_BASE = 0x10000000
 LOCALIZE = True  # general registers in C locals (--no-localize to compare)
 DIRTY_TRACKING = True  # spill only changed state (--no-dirty to compare)
+NATIVE = False  # use NATIVE_OVERRIDES (native host builds: --base other than the DLL's)
 
 REG32 = {"eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi"}
 REG16 = {"ax": "eax", "cx": "ecx", "dx": "edx", "bx": "ebx", "sp": "esp", "bp": "ebp", "si": "esi", "di": "edi"}
@@ -37,6 +38,9 @@ REG8H = {"ah": "eax", "ch": "ecx", "dh": "edx", "bh": "ebx"}
 SETJMP_TARGETS = {0x10a88a30}
 # Statically linked MSVC helpers emitted inline at their call sites (no call, no register spill): float->int64
 # truncation, stack probes (alloca/large frames) and 64-bit integer helpers.
+# Engine functions replaced by native implementations in the native host (src/native/hot_*.cpp): f_<addr> just
+# forwards to Native_<original addr>.
+NATIVE_OVERRIDES = {0x105e8860}
 INLINE_HELPERS = {0x10a88426: "ftol2", 0x10a883b0: "chkstk", 0x10a889e0: "chkstk16", 0x10a889f6: "chkstk8",
                   0x10a88370: "allmul", 0x10a884b0: "allshl", 0x10ba2b50: "aullshr"}
 SETJMP_IAT = {0x11331fc4}
@@ -1485,10 +1489,13 @@ def main():
                     help="engine load address (native host: 0x58000000)")
     ap.add_argument("--no-localize", action="store_true", help="keep general registers in the context")
     ap.add_argument("--no-dirty", action="store_true", help="spill all localized state at every call")
+    ap.add_argument("--no-native", action="store_true", help="recompile NATIVE_OVERRIDES too (difftests)")
     args = ap.parse_args()
     global LOCALIZE, DIRTY_TRACKING
     LOCALIZE = not args.no_localize
     DIRTY_TRACKING = not args.no_dirty
+    global NATIVE
+    NATIVE = args.base != ORIG_BASE and not args.no_native  # the Wine host has no Native_* implementations
     rebase(args.base)
     sizes = load_functions()
     if args.functions == "all":
@@ -1515,6 +1522,10 @@ def main():
         va = work.pop(0)
         if va not in sizes:
             print(f"skip {va:#x}: not a function start", file=sys.stderr)
+            continue
+        orig = va - BASE + ORIG_BASE
+        if NATIVE and orig in NATIVE_OVERRIDES:
+            funcs.append((va, f"void Native_{orig:08x}(Ctx* c);\nvoid f_{va:08x}(Ctx* c) {{ Native_{orig:08x}(c); }}"))
             continue
         fc = FunctionCompiler(md, pe, va, sizes[va], compiled)
         funcs.append((va, fc.compile()))
