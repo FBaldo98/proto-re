@@ -98,9 +98,9 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
         new Button("СПЕЦ", 0, MOUSE_RIGHT, true, 183, true, 62, 33, true),
         new Button("ЗАХВАТ", KeyEvent.KEYCODE_E, 0, true, 158, true, 150, 31, true),
         new Button("ПРЫЖОК", KeyEvent.KEYCODE_SPACE, 0, true, 66, true, 180, 33, true),
-        new Button("ЦЕЛЬ", 0, MOUSE_MIDDLE, true, 258, true, 140, 27, true),  // lock-on: middle button on PC
+        new Button("ЦЕЛЬ", KeyEvent.KEYCODE_TAB, 0, true, 258, true, 140, 27, true),  // lock-on is Tab on PC
         new Button("БЕГ", KeyEvent.KEYCODE_SHIFT_LEFT, 0, true, 168, true, 245, 27, true),
-        new Button("СИЛЫ", KeyEvent.KEYCODE_TAB, 0, true, 190, false, 33, 24, true),
+        new Button("СИЛЫ", 0, MOUSE_MIDDLE, true, 190, false, 33, 24, true),  // power wheel: middle button
     };
 
     // ---- settings ----
