@@ -9,12 +9,17 @@
 #include <d3d9.h>
 
 #include <unistd.h>
+#ifdef __ANDROID__
+#include <jni.h>
+#endif
 
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <map>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <type_traits>
 #include <unordered_map>
 #include <vector>
@@ -793,20 +798,51 @@ void MaybeScreenshot(IDirect3DDevice9* dev) {
     bb->Release();
 }
 
+// The window can go away under the render thread (Android destroys the surface when the app leaves the screen):
+// ProtoSurface.surfaceDestroyed waits for a present in flight and holds presents back until the surface is back,
+// as presenting or recreating the swap chain on a destroyed window crashes in the Vulkan loader. A skipped present
+// just drops the frame.
+std::mutex g_present_mutex;
+bool g_surface_gone = false;  // under g_present_mutex
+
+template <typename F>
+HRESULT GuardedPresent(F present) {
+    std::unique_lock<std::mutex> lock(g_present_mutex);
+    if (g_surface_gone) {
+        lock.unlock();
+        std::this_thread::sleep_for(std::chrono::milliseconds(16));
+        return D3D_OK;
+    }
+    return present();
+}
+
+#ifdef __ANDROID__
+extern "C" JNIEXPORT void JNICALL Java_com_protore_game_ProtoSurface_nativeSurfaceGone(JNIEnv*, jclass) {
+    std::lock_guard<std::mutex> lock(g_present_mutex);
+    g_surface_gone = true;
+}
+extern "C" JNIEXPORT void JNICALL Java_com_protore_game_ProtoSurface_nativeSurfaceReady(JNIEnv*, jclass) {
+    std::lock_guard<std::mutex> lock(g_present_mutex);
+    g_surface_gone = false;
+}
+#endif
+
 M(IDirect3DDevice9, Present) {
     ++g_present_count;
     if (!g_graves.empty()) DrainGraves(false);
-    MaybeScreenshot(Host<IDirect3DDevice9>(Arg(c, 0)));
-    HRESULT hr = Host<IDirect3DDevice9>(Arg(c, 0))->Present(Ptr<RECT>(Arg(c, 1)), Ptr<RECT>(Arg(c, 2)), nullptr,
-                                                            nullptr);
+    auto* dev = Host<IDirect3DDevice9>(Arg(c, 0));
+    MaybeScreenshot(dev);
+    HRESULT hr =
+        GuardedPresent([&] { return dev->Present(Ptr<RECT>(Arg(c, 1)), Ptr<RECT>(Arg(c, 2)), nullptr, nullptr); });
     Return(c, uint32_t(hr), 5);
 }
 // The engine's worker threads poll this before every buffer lock; DXVK answers D3D_OK for a windowed device but
 // takes the device lock first, so the polls queue up behind the render thread's draws and presents.
 M(IDirect3DDevice9, TestCooperativeLevel) { Return(c, uint32_t(D3D_OK), 1); }
 M(IDirect3DSwapChain9, Present) {
-    HRESULT hr = Host<IDirect3DSwapChain9>(Arg(c, 0))->Present(Ptr<RECT>(Arg(c, 1)), Ptr<RECT>(Arg(c, 2)), nullptr,
-                                                               nullptr, Arg(c, 5));
+    auto* sc = Host<IDirect3DSwapChain9>(Arg(c, 0));
+    HRESULT hr = GuardedPresent([&] { return sc->Present(Ptr<RECT>(Arg(c, 1)), Ptr<RECT>(Arg(c, 2)), nullptr, nullptr,
+                                                         Arg(c, 5)); });
     Return(c, uint32_t(hr), 6);
 }
 M(IDirect3DSwapChain9, GetPresentParameters) {

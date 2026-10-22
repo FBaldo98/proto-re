@@ -82,7 +82,7 @@ void Run(int seconds) {
             threads = g_threads;
         }
         for (const Registered& r : threads) {
-            pthread_kill(r.handle, SIGUSR2);
+            tgkill(getpid(), r.tid, SIGUSR2);  // by tid: a thread that has exited is just skipped (ESRCH)
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
         }
     }
