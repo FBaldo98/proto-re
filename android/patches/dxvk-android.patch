@@ -138,7 +138,7 @@ index f91857b..64c0316 100644
    };
  
 diff --git a/src/d3d9/d3d9_swapchain.cpp b/src/d3d9/d3d9_swapchain.cpp
-index 391cec8..0925853 100644
+index 391cec8..e44413c 100644
 --- a/src/d3d9/d3d9_swapchain.cpp
 +++ b/src/d3d9/d3d9_swapchain.cpp
 @@ -5,6 +5,8 @@
@@ -150,7 +150,7 @@ index 391cec8..0925853 100644
  namespace dxvk {
  
    static uint16_t MapGammaControlPoint(float x) {
-@@ -818,7 +820,35 @@ namespace dxvk {
+@@ -818,7 +820,37 @@ namespace dxvk {
    }
  
  
@@ -169,12 +169,14 @@ index 391cec8..0925853 100644
 +  struct D3D9PresentStats {
 +    bool on = false;
 +    uint64_t frames = 0;
-+    double submit = 0, acquire = 0, latency = 0, total = 0;
++    double submit = 0, acquire = 0, relock = 0, preAcq = 0, acqOnly = 0, latency = 0, total = 0, wallStart = 0;
++    DxvkStatCounters counters;
 +    static double now() {
 +      return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
 +    }
 +  };
 +  static D3D9PresentStats g_presentStats;
++  extern std::atomic<uint64_t> g_acqFenceUs, g_acqCallUs, g_acqSlow, g_preAcqUs, g_preFenceUs;  // dxvk_presenter.cpp
 +#endif
 +
    void D3D9SwapChainEx::PresentImage(UINT SyncInterval) {
@@ -186,7 +188,7 @@ index 391cec8..0925853 100644
      m_parent->EndFrame();
      m_parent->Flush();
  
-@@ -827,7 +857,19 @@ namespace dxvk {
+@@ -827,7 +859,22 @@ namespace dxvk {
      Rc<DxvkImageView> swapImageView = m_backBuffers[0]->GetImageView(false);
  
      for (uint32_t i = 0; i < SyncInterval || i < 1; i++) {
@@ -198,7 +200,10 @@ index 391cec8..0925853 100644
 +        submitStatus = m_device->waitForSubmission(&m_presentStatus);
 +      }
 +      double t1 = g_presentStats.on ? D3D9PresentStats::now() : 0;
-+      if (submitStatus != VK_SUCCESS)
++      // VK_SUBOPTIMAL_KHR: Android reports it every frame while the display is rotated against the swap chain's
++      // transform (landscape); the compositor rotates, so present as is instead of recreating the swap chain -
++      // with a GPU idle wait - every frame.
++      if (submitStatus != VK_SUCCESS && submitStatus != VK_SUBOPTIMAL_KHR)
 +        RecreateSwapChain();
 +#else
        SynchronizePresent();
@@ -206,27 +211,43 @@ index 391cec8..0925853 100644
  
        // Presentation semaphores and WSI swap chain image
        PresenterInfo info = m_wctx->presenter->info();
-@@ -835,7 +877,19 @@ namespace dxvk {
+@@ -835,9 +882,35 @@ namespace dxvk {
  
        uint32_t imageIndex = 0;
  
 +#ifdef __ANDROID__
 +      VkResult status;
++      double t2;
++      double tu, ta;
 +      {
 +        D3D9PresentUnlocked unlocked(m_parent);
++        tu = g_presentStats.on ? D3D9PresentStats::now() : 0;
 +        status = m_wctx->presenter->acquireNextImage(sync, imageIndex);
++        t2 = g_presentStats.on ? D3D9PresentStats::now() : 0;
++      }
++      ta = tu;
++      if (g_presentStats.on) {
++        g_presentStats.preAcq += tu - t1;
++        g_presentStats.acqOnly += t2 - ta;
 +      }
 +      if (g_presentStats.on) {
 +        g_presentStats.submit += t1 - t0;
-+        g_presentStats.acquire += D3D9PresentStats::now() - t1;
++        g_presentStats.acquire += t2 - t1;
++        g_presentStats.relock += D3D9PresentStats::now() - t2;
 +      }
 +#else
        VkResult status = m_wctx->presenter->acquireNextImage(sync, imageIndex);
 +#endif
  
++#ifdef __ANDROID__
++      while (status != VK_SUCCESS && status != VK_SUBOPTIMAL_KHR) {  // see above
++#else
        while (status != VK_SUCCESS) {
++#endif
          RecreateSwapChain();
-@@ -913,7 +967,28 @@ namespace dxvk {
+         
+         info = m_wctx->presenter->info();
+@@ -913,7 +986,42 @@ namespace dxvk {
        m_parent->FlushCsChunk();
      }
  
@@ -241,10 +262,24 @@ index 391cec8..0925853 100644
 +        double t1 = D3D9PresentStats::now();
 +        g_presentStats.latency += t1 - t0;
 +        g_presentStats.total += t1 - tStart;
-+        if (++g_presentStats.frames == 300) {
-+          Logger::info(str::format("present: per frame ", g_presentStats.total / 300, " ms: submit wait ",
-+            g_presentStats.submit / 300, " acquire ", g_presentStats.acquire / 300, " latency wait ",
-+            g_presentStats.latency / 300, " (frame latency ", GetActualFrameLatency(), ")"));
++        if (g_presentStats.frames == 0) {
++          g_presentStats.wallStart = t1;
++          g_presentStats.counters = m_device->getStatCounters();
++        }
++        if (++g_presentStats.frames == 301) {
++          const double n = 300;
++          DxvkStatCounters now = m_device->getStatCounters();
++          DxvkStatCounters d = now.diff(g_presentStats.counters);
++          double wall = t1 - g_presentStats.wallStart;
++          Logger::info(str::format("present: ", n * 1000.0 / wall, " fps, per frame ", g_presentStats.total / n,
++            " ms: submit wait ", g_presentStats.submit / n, " acquire ", g_presentStats.acquire / n, " relock ", g_presentStats.relock / n, " (before acquire ", g_presentStats.preAcq / n, " acquire call ", g_presentStats.acqOnly / n, ")",
++            " latency wait ", g_presentStats.latency / n, " | gpu idle ", d.getCtr(DxvkStatCounter::GpuIdleTicks) / 1000.0 / n,
++            " ms, gpu syncs ", d.getCtr(DxvkStatCounter::GpuSyncCount) / n, " (", d.getCtr(DxvkStatCounter::GpuSyncTicks) / 1000.0 / n,
++            " ms), cs syncs ", d.getCtr(DxvkStatCounter::CsSyncCount) / n, " (", d.getCtr(DxvkStatCounter::CsSyncTicks) / 1000.0 / n,
++            " ms), draws ", d.getCtr(DxvkStatCounter::CmdDrawCalls) / n, ", passes ", d.getCtr(DxvkStatCounter::CmdRenderPassCount) / n,
++            ", barriers ", d.getCtr(DxvkStatCounter::CmdBarrierCount) / n, ", submits ", d.getCtr(DxvkStatCounter::QueueSubmitCount) / n,
++            " | app acquires ", g_acqSlow.exchange(0), " fence ", g_acqFenceUs.exchange(0) / 1000.0 / n, " call ", g_acqCallUs.exchange(0) / 1000.0 / n,
++            " ms; queue pre-acquire fence ", g_preFenceUs.exchange(0) / 1000.0 / n, " call ", g_preAcqUs.exchange(0) / 1000.0 / n, " ms"));
 +          g_presentStats = D3D9PresentStats();
 +        }
 +      }
@@ -551,6 +586,62 @@ index 1285c4e..151caa9 100644
      
      Rc<vk::DeviceFn> vkd = new vk::DeviceFn(m_vki, true, device);
  
+diff --git a/src/dxvk/dxvk_presenter.cpp b/src/dxvk/dxvk_presenter.cpp
+index 27d6bb1..922f178 100644
+--- a/src/dxvk/dxvk_presenter.cpp
++++ b/src/dxvk/dxvk_presenter.cpp
+@@ -1,3 +1,5 @@
++#include <chrono>
++#include <atomic>
+ #include <algorithm>
+ 
+ #include "dxvk_device.h"
+@@ -54,17 +56,29 @@ namespace dxvk {
+   }
+ 
+ 
++  // Android port diagnostics (DXVK_PRESENT_STATS): where an application-side acquire waits.
++  std::atomic<uint64_t> g_acqFenceUs{0}, g_acqCallUs{0}, g_acqSlow{0}, g_preAcqUs{0}, g_preFenceUs{0};
++  static uint64_t nowUs() {
++    return std::chrono::duration_cast<std::chrono::microseconds>(
++      std::chrono::steady_clock::now().time_since_epoch()).count();
++  }
++
+   VkResult Presenter::acquireNextImage(PresenterSync& sync, uint32_t& index) {
+     PresenterSync& semaphores = m_semaphores.at(m_frameIndex);
+     sync = semaphores;
+ 
+     // Don't acquire more than one image at a time
+     if (m_acquireStatus == VK_NOT_READY) {
++      uint64_t t0 = nowUs();
+       waitForSwapchainFence(semaphores);
++      uint64_t t1 = nowUs();
+ 
+       m_acquireStatus = m_vkd->vkAcquireNextImageKHR(m_vkd->device(),
+         m_swapchain, std::numeric_limits<uint64_t>::max(),
+         sync.acquire, VK_NULL_HANDLE, &m_imageIndex);
++      g_acqFenceUs += t1 - t0;
++      g_acqCallUs += nowUs() - t1;
++      g_acqSlow += 1;
+     }
+ 
+     if (m_acquireStatus != VK_SUCCESS && m_acquireStatus != VK_SUBOPTIMAL_KHR)
+@@ -122,11 +136,15 @@ namespace dxvk {
+     m_frameIndex %= m_semaphores.size();
+ 
+     PresenterSync& nextSync = m_semaphores.at(m_frameIndex);
++    uint64_t t0 = nowUs();
+     waitForSwapchainFence(nextSync);
++    uint64_t t1 = nowUs();
+ 
+     m_acquireStatus = m_vkd->vkAcquireNextImageKHR(m_vkd->device(),
+       m_swapchain, std::numeric_limits<uint64_t>::max(),
+       nextSync.acquire, VK_NULL_HANDLE, &m_imageIndex);
++    g_preFenceUs += t1 - t0;
++    g_preAcqUs += nowUs() - t1;
+ 
+     return status;
+   }
 diff --git a/src/wsi/sdl2/wsi_platform_sdl2.cpp b/src/wsi/sdl2/wsi_platform_sdl2.cpp
 index 203cb6d..d8c0255 100644
 --- a/src/wsi/sdl2/wsi_platform_sdl2.cpp
