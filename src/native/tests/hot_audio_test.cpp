@@ -18,13 +18,26 @@ volatile uint32_t RecompRestrictLo = 0, RecompRestrictHi = 0xffffffffu, RecompTe
 uint8_t* RecompMemoryBase = nullptr;
 void f_585e8860(Ctx* c);  // recompiled references (ref.c)
 void f_585c62e0(Ctx* c);
+void f_585eb280(Ctx* c);
 void Native_105e8860(Ctx* c);
 void Native_105c62e0(Ctx* c);
+void Native_105eb280(Ctx* c);
+// Stand-in for the engine allocator FUN_105ba610 (cdecl): a fixed scratch block.
+static uint32_t g_alloc_calls = 0;
+static void FakeAlloc(Ctx* c) {
+    ++g_alloc_calls;
+    c->eax = 0x2f000000u;
+    c->ret_target = Pop32(c);
+}
 void RecompDispatch(Ctx* c, uint32_t target) {
+    if (target == 0x585ba610u) {
+        FakeAlloc(c);
+        return;
+    }
     fprintf(stderr, "unexpected dispatch to %08x\n", target);
     exit(2);
 }
-RecompFn RecompLookup(uint32_t) { return nullptr; }
+RecompFn RecompLookup(uint32_t va) { return va == 0x585ba610u ? FakeAlloc : nullptr; }
 void RecompUnimplemented(Ctx*, uint32_t va, const char* what) {
     fprintf(stderr, "trap %08x %s\n", va, what);
     exit(2);
@@ -53,21 +66,18 @@ void MapAt(uint32_t addr, uint32_t size) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    // Engine constants used by the function (DLL addresses, values read by run_hot_test.sh).
-    if (argc < 4) return 1;
-    const uint32_t const_addrs[4] = {0x10e2e9dc, 0x10e2e864, 0x10e313a4, 0x10d946e0};
-    if (argc < 5) return 1;
-    for (int i = 0; i < 4; ++i) {
-        uint32_t a = const_addrs[i] - 0x10000000u + native::kEngineBase;
-        uint32_t page = a & ~0xfffu;
-        static uint32_t mapped[4];
-        bool done = false;
-        for (int k = 0; k < i; ++k) done |= mapped[k] == page;
-        if (!done) MapAt(page, 0x1000);
-        mapped[i] = page;
-        float v = strtof(argv[1 + i], nullptr);
-        memcpy(reinterpret_cast<void*>(uintptr_t(a)), &v, 4);
+    // Engine data pages the functions read (constants, tables): dumped from the DLL by run_hot_test.sh as
+    // records of {uint32 DLL address, 4096 bytes}.
+    if (argc < 2) return 1;
+    FILE* pages = fopen(argv[1], "rb");
+    if (!pages) return 1;
+    for (uint32_t dll_addr; fread(&dll_addr, 4, 1, pages) == 1;) {
+        uint32_t a = dll_addr - 0x10000000u + native::kEngineBase;
+        MapAt(a, 0x1000);
+        if (fread(reinterpret_cast<void*>(uintptr_t(a)), 1, 0x1000, pages) != 0x1000) return 1;
     }
+    fclose(pages);
+    MapAt(0x2f000000u, 1u << 20);  // FakeAlloc scratch
     MapAt(0x20000000u, 64u << 20);
 
     std::mt19937 rng(1234);
@@ -195,5 +205,54 @@ int main(int argc, char** argv) {
         }
     }
     printf("biquad %s: %d/300 trials differ\n", failures ? "FAIL" : "OK", failures);
-    return failures || mixer_failures ? 1 : 0;
+    int biquad_failures = failures;
+    failures = 0;
+
+    // FUN_105eb280: IMA ADPCM blocks with random headers/nibbles into per-channel buffers.
+    for (int trial = 0; trial < 200; ++trial) {
+        g_next = 0x20000000u;
+        const uint32_t channels = 1 + trial % 3, blocks = trial % 5, first = trial % 4, stride = 20 * channels;
+        uint32_t stream = Alloc(0x100), data = Alloc(stride * (first + blocks + 1) + 16);
+        for (uint32_t i = 0; i < stride * (first + blocks + 1); ++i) W8(data + i, uint8_t(rng()));
+        for (uint32_t b = 0; b < first + blocks; ++b)
+            for (uint32_t ch = 0; ch < channels; ++ch) W16(data + b * stride + ch * 20, uint16_t(rng() % 89));
+        W32(stream + 0x8c, data);
+        W32(stream + 0x94, channels);
+        for (uint32_t ch = 0; ch < channels; ++ch) {
+            uint32_t buf = Alloc(0x80 * (first + blocks + 1) + 16) + (trial % 4);  // aligned down to 4 by the code
+            W32(stream + 0xc + 4 * ch, buf);
+        }
+        const uint32_t lo = 0x20000000u, size = g_next - lo;
+        std::vector<uint8_t> start(size), ref(size);
+        memcpy(start.data(), native::Ptr<void>(lo), size);
+        uint32_t stack = Alloc(0x4000) + 0x3000;
+        auto run = [&](void (*fn)(Ctx*)) {
+            memset(native::Ptr<void>(stack - 0x3000), 0, 0x4000);
+            Ctx c;
+            memset(&c, 0, sizeof(c));
+            c.esp = stack;
+            Push32(&c, blocks);
+            Push32(&c, first);
+            Push32(&c, stride);
+            Push32(&c, stream);
+            Push32(&c, 0x12345678u);
+            g_alloc_calls = 0;
+            fn(&c);
+            return c;
+        };
+        memcpy(native::Ptr<void>(lo), start.data(), size);
+        Ctx a = run(f_585eb280);
+        uint32_t calls_a = g_alloc_calls;
+        memcpy(ref.data(), native::Ptr<void>(lo), size);
+        memcpy(native::Ptr<void>(lo), start.data(), size);
+        Ctx b = run(Native_105eb280);
+        bool same_regs = a.esp == b.esp && a.ret_target == b.ret_target && a.ebx == b.ebx && a.esi == b.esi &&
+                         a.edi == b.edi && a.ebp == b.ebp && calls_a == g_alloc_calls;
+        if (!same_regs || memcmp(ref.data(), native::Ptr<void>(lo), size) != 0) {
+            if (failures < 3) printf("adpcm trial %d differs%s\n", trial, same_regs ? "" : " (registers/allocations)");
+            ++failures;
+        }
+    }
+    printf("adpcm %s: %d/200 trials differ\n", failures ? "FAIL" : "OK", failures);
+    return failures || mixer_failures || biquad_failures ? 1 : 0;
 }

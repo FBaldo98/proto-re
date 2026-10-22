@@ -7,6 +7,7 @@
 // multiply/add pairs unfused.
 #include <cmath>
 #include <cstring>
+#include <initializer_list>
 
 #include "guest.h"
 
@@ -22,6 +23,19 @@ inline uint32_t E(uint32_t a) { return a - 0x10000000u + kEngineBase; }
 
 inline float F(uint32_t a) { return RF32(a); }
 inline const float* FP(uint32_t a) { return Ptr<const float>(a); }
+
+// Calls a recompiled engine function (cdecl) from native code on the same guest stack; returns eax.
+uint32_t CallGuestCdecl(Ctx* c, uint32_t engine_va, std::initializer_list<uint32_t> args) {
+    const uint32_t va = E(engine_va);
+    RecompFn fn = RecompLookup(va);
+    const uint32_t* a = args.end();
+    while (a != args.begin()) Push32(c, *--a);
+    Push32(c, 0xfffffff0u);  // return address, never used: the callee only pops it
+    if (fn) fn(c);
+    else RecompDispatch(c, va);
+    c->esp += 4 * uint32_t(args.size());
+    return c->eax;
+}
 
 }  // namespace
 
@@ -114,6 +128,54 @@ extern "C" void Native_105c62e0(Ctx* c) {
     WF32(st + 0x18, x1);
     WF32(st + 0x1c, x2);
     WF32(st + 0x24, y2);
+    c->ret_target = Pop32(c);  // cdecl
+}
+
+// FUN_105eb280 (cdecl, 4 args): IMA ADPCM decoding of `blocks` blocks (per channel: index and predictor header,
+// 16 bytes = 32 samples) into each channel's float buffer (4-byte aligned down). It also takes scratch memory from
+// the engine's allocator FUN_105ba610 (unused by the decoding itself; kept for the allocator's state).
+//   p1: stream (+0xc channel destinations, +0x8c data, +0x94 channel count); p2*p3: byte offset of the first
+//   block; p3: first block index; p4: block count
+extern "C" void Native_105eb280(Ctx* c) {
+    const uint32_t esp = c->esp;
+    const uint32_t p1 = R32(esp + 4), p2 = R32(esp + 8), p3 = R32(esp + 12), blocks = R32(esp + 16);
+    const uint8_t* src = Ptr<const uint8_t>(p2 * p3 + R32(p1 + 0x8c));
+    uint32_t channels = R32(p1 + 0x94);
+    uint32_t dest[64] = {};
+    if (channels != 0) {
+        CallGuestCdecl(c, 0x105ba610, {blocks << 7, 0x10});
+        for (uint32_t ch = 0; ch < channels && ch < 64; ++ch) dest[ch] = (R32(p1 + 0xc + 4 * ch) + p3 * 0x80) & ~3u;
+    }
+    const int32_t* steps = Ptr<const int32_t>(E(0x10e314f8));
+    const int32_t* index_delta = Ptr<const int32_t>(E(0x10e314b8));
+    const float scale = F(E(0x10e3165c));
+    auto decode = [&](int32_t& index, int32_t& pred, uint32_t nibble) {
+        const int32_t step = steps[index];
+        int32_t diff = ((nibble & 1) ? step >> 2 : 0) + ((nibble & 2) ? step >> 1 : 0) + ((nibble & 4) ? step : 0) +
+                       (step >> 3);
+        pred += (nibble & 8) ? -diff : diff;
+        if (pred > 0x7fff) pred = 0x7fff;
+        if (pred < -0x8000) pred = -0x8000;
+        int32_t next = index + index_delta[nibble];
+        if (next > 0x58) next = 0x58;
+        if (next < 0) next = 0;
+        index = next;
+        return pred;
+    };
+    for (uint32_t b = 0; b < blocks; ++b) {
+        for (uint32_t ch = 0; ch < channels; ++ch) {
+            int32_t index = int16_t(src[0] | src[1] << 8);
+            int32_t pred = int16_t(src[2] | src[3] << 8);
+            src += 4;
+            float* out = Ptr<float>(b * 0x80 + dest[ch < 64 ? ch : 63]);
+            for (int k = 0; k < 16; ++k) {
+                const uint8_t byte = *src++;
+                *out++ = float(decode(index, pred, byte & 0xf)) * scale;
+                *out++ = float(decode(index, pred, byte >> 4)) * scale;
+            }
+            channels = R32(p1 + 0x94);
+        }
+    }
     c->ret_target = Pop32(c);  // cdecl
 }
 
