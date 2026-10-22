@@ -132,7 +132,7 @@ bool DispatchImport(Ctx* ctx, uint32_t target) {
         Fatal("unimplemented import %s!%s (called from %08x, args %08x %08x %08x %08x)", s.dll.c_str(),
               s.name.c_str(), R32(ctx->esp), Arg(ctx, 0), Arg(ctx, 1), Arg(ctx, 2), Arg(ctx, 3));
     }
-    if (ImportProfiling()) {
+    if (ImportProfiling() && s.name != "SwitchToFiber") {  // a fiber switch does not return until switched back
         ProfiledCall(s, index, ctx);
     } else {
         s.fn(ctx);

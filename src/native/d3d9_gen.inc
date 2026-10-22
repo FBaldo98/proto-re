@@ -46,7 +46,8 @@ static const MethodDef kMethods_IDirect3D9[] = {
 static void h_IDirect3DDevice9_QueryInterface(Ctx* c) { QueryInterfaceImpl<IDirect3DDevice9>(c); }
 static void h_IDirect3DDevice9_AddRef(Ctx* c) { auto r = Host<IDirect3DDevice9>(Arg(c, 0))->AddRef();  Return(c, (uint32_t)r, 1); }
 static void h_IDirect3DDevice9_Release(Ctx* c) { ReleaseImpl<IDirect3DDevice9>(c); }
-static void h_IDirect3DDevice9_TestCooperativeLevel(Ctx* c) { auto r = Host<IDirect3DDevice9>(Arg(c, 0))->TestCooperativeLevel();  Return(c, (uint32_t)r, 1); }
+void Manual_IDirect3DDevice9_TestCooperativeLevel(Ctx* c);
+static void h_IDirect3DDevice9_TestCooperativeLevel(Ctx* c) { Manual_IDirect3DDevice9_TestCooperativeLevel(c); }
 static void h_IDirect3DDevice9_GetAvailableTextureMem(Ctx* c) { auto r = Host<IDirect3DDevice9>(Arg(c, 0))->GetAvailableTextureMem();  Return(c, (uint32_t)r, 1); }
 static void h_IDirect3DDevice9_EvictManagedResources(Ctx* c) { auto r = Host<IDirect3DDevice9>(Arg(c, 0))->EvictManagedResources();  Return(c, (uint32_t)r, 1); }
 static void h_IDirect3DDevice9_GetDirect3D(Ctx* c) { IDirect3D9* out1 = nullptr; auto r = Host<IDirect3DDevice9>(Arg(c, 0))->GetDirect3D(Arg(c, 1) ? &out1 : nullptr); if (Arg(c, 1)) W32(Arg(c, 1), Wrap(out1)); Return(c, (uint32_t)r, 2); }

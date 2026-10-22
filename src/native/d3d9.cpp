@@ -10,6 +10,7 @@
 
 #include <unistd.h>
 
+#include <atomic>
 #include <cstring>
 #include <map>
 #include <mutex>
@@ -40,7 +41,33 @@ struct InterfaceDef {
 };
 
 std::recursive_mutex g_mutex;
-std::vector<void*> g_hosts;                      // index -> host object
+// index -> host object, read without a lock by every bridged call: fixed chunks that never move, appended to
+// under g_mutex.
+class HostTable {
+public:
+    void* Get(uint32_t i) const {
+        return chunks_[i >> kBits].load(std::memory_order_acquire)[i & kMask].load(std::memory_order_acquire);
+    }
+    void Set(uint32_t i, void* p) {
+        chunks_[i >> kBits].load(std::memory_order_relaxed)[i & kMask].store(p, std::memory_order_release);
+    }
+    uint32_t Append(void* p) {
+        uint32_t i = size_;
+        if ((i >> kBits) >= kChunks) Fatal("d3d9: too many objects");
+        if (!chunks_[i >> kBits].load(std::memory_order_relaxed)) {
+            chunks_[i >> kBits].store(new std::atomic<void*>[kMask + 1](), std::memory_order_release);
+        }
+        Set(i, p);
+        ++size_;
+        return i;
+    }
+
+private:
+    static constexpr uint32_t kBits = 14, kMask = (1u << kBits) - 1, kChunks = 4096;
+    std::atomic<std::atomic<void*>*> chunks_[kChunks] = {};
+    uint32_t size_ = 0;
+};
+HostTable g_hosts;
 // host object -> guest object. Child surfaces die with their texture without a Release through the bridge, so an
 // entry can be stale: a new object at the same address with another interface must not reuse it.
 std::unordered_map<void*, uint32_t> g_guest_of;
@@ -48,8 +75,7 @@ std::map<std::string, uint32_t> g_vtables;       // interface name -> guest vtab
 
 template <typename T>
 T* Host(uint32_t guest) {
-    std::lock_guard<std::recursive_mutex> lock(g_mutex);
-    return static_cast<T*>(g_hosts[R32(guest + 4)]);
+    return static_cast<T*>(g_hosts.Get(R32(guest + 4)));
 }
 
 template <typename T>
@@ -66,8 +92,7 @@ uint32_t WrapAs(void* host, const char* iface) {
     if (it != g_guest_of.end() && R32(it->second) == vt->second) return it->second;
     uint32_t g = HeapAlloc(16);
     W32(g, vt->second);
-    W32(g + 4, uint32_t(g_hosts.size()));
-    g_hosts.push_back(host);
+    W32(g + 4, g_hosts.Append(host));
     g_guest_of[host] = g;
     return g;
 }
@@ -75,9 +100,9 @@ uint32_t WrapAs(void* host, const char* iface) {
 void Forget(uint32_t guest) {
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
     uint32_t index = R32(guest + 4);
-    auto it = g_guest_of.find(g_hosts[index]);
+    auto it = g_guest_of.find(g_hosts.Get(index));
     if (it != g_guest_of.end() && it->second == guest) g_guest_of.erase(it);
-    g_hosts[index] = nullptr;
+    g_hosts.Set(index, nullptr);
     W32(guest, 0);
     // The guest block is not reused: a stale guest pointer then faults on a null vtable instead of aliasing.
 }
@@ -776,6 +801,9 @@ M(IDirect3DDevice9, Present) {
                                                             nullptr);
     Return(c, uint32_t(hr), 5);
 }
+// The engine's worker threads poll this before every buffer lock; DXVK answers D3D_OK for a windowed device but
+// takes the device lock first, so the polls queue up behind the render thread's draws and presents.
+M(IDirect3DDevice9, TestCooperativeLevel) { Return(c, uint32_t(D3D_OK), 1); }
 M(IDirect3DSwapChain9, Present) {
     HRESULT hr = Host<IDirect3DSwapChain9>(Arg(c, 0))->Present(Ptr<RECT>(Arg(c, 1)), Ptr<RECT>(Arg(c, 2)), nullptr,
                                                                nullptr, Arg(c, 5));

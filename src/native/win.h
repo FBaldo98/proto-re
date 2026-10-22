@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include "guest.h"
 
@@ -13,17 +14,27 @@ namespace native {
 // ---- kernel objects ----
 enum class KType { Event, Semaphore, Mutex, Thread, File, Find, Module };
 
+// A thread blocked in WaitForSingleObject/WaitForMultipleObjects.
+struct KWaiter {
+    std::condition_variable cv;
+};
+
 struct KObject {
     explicit KObject(KType t) : type(t) {}
     virtual ~KObject() = default;
     // Waitable objects: signaled state and the side effect of a successful wait (auto-reset, count, ownership).
     virtual bool Signaled(uint32_t /*thread_id*/) { return false; }
     virtual void Acquire(uint32_t /*thread_id*/) {}
+    // Wakes the threads waiting for this object; g_kernel_mutex is held.
+    void Notify() {
+        for (KWaiter* w : waiters) w->cv.notify_one();
+    }
     KType type;
     int refs = 1;
+    std::vector<KWaiter*> waiters;  // under g_kernel_mutex
 };
 
-// All waitable state changes happen under this lock and notify g_kernel_cv.
+// All waitable state changes happen under this lock and Notify() the object (g_kernel_cv: thread resumption).
 extern std::mutex g_kernel_mutex;
 extern std::condition_variable g_kernel_cv;
 

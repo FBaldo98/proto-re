@@ -29,8 +29,12 @@ const char* const kGuestGameDir = "C:\\Game";
 namespace {
 
 // ---- handles ----
+// handle = 0x100 + 4 * index. Lookups (every wait and signal) read the table without a lock; slots are assigned
+// and cleared under g_handles_mutex.
+constexpr uint32_t kMaxHandles = 1u << 16;
 std::mutex g_handles_mutex;
-std::vector<KObject*> g_handles;  // handle = 0x100 + 4 * index
+std::atomic<KObject*> g_handles[kMaxHandles];
+uint32_t g_handles_used = 0;  // slots below this have been handed out at least once
 
 thread_local uint32_t tl_last_error = 0;
 
@@ -38,21 +42,18 @@ thread_local uint32_t tl_last_error = 0;
 
 uint32_t NewHandle(KObject* obj) {
     std::lock_guard<std::mutex> lock(g_handles_mutex);
-    for (size_t i = 0; i < g_handles.size(); ++i) {
-        if (!g_handles[i]) {
-            g_handles[i] = obj;
-            return 0x100 + 4 * uint32_t(i);
-        }
-    }
-    g_handles.push_back(obj);
-    return 0x100 + 4 * uint32_t(g_handles.size() - 1);
+    uint32_t i = 0;
+    while (i < g_handles_used && g_handles[i].load(std::memory_order_relaxed)) ++i;
+    if (i == kMaxHandles) Fatal("out of kernel handles");
+    if (i == g_handles_used) ++g_handles_used;
+    g_handles[i].store(obj, std::memory_order_release);
+    return 0x100 + 4 * i;
 }
 
 KObject* HandleObject(uint32_t handle) {
-    std::lock_guard<std::mutex> lock(g_handles_mutex);
     if (handle < 0x100 || (handle & 3)) return nullptr;
     uint32_t i = (handle - 0x100) / 4;
-    return i < g_handles.size() ? g_handles[i] : nullptr;
+    return i < kMaxHandles ? g_handles[i].load(std::memory_order_acquire) : nullptr;
 }
 
 void CloseKernelHandle(uint32_t handle) {
@@ -61,9 +62,8 @@ void CloseKernelHandle(uint32_t handle) {
         std::lock_guard<std::mutex> lock(g_handles_mutex);
         if (handle < 0x100 || (handle & 3)) return;
         uint32_t i = (handle - 0x100) / 4;
-        if (i >= g_handles.size()) return;
-        obj = g_handles[i];
-        g_handles[i] = nullptr;
+        if (i >= kMaxHandles) return;
+        obj = g_handles[i].exchange(nullptr);
     }
     if (obj && --obj->refs == 0 && obj->type != KType::Thread) delete obj;
 }
@@ -210,14 +210,35 @@ struct Thread : KObject {
 
 uint32_t CurrentTid() { return CurrentThread()->id; }
 
-// Waits until `pred` holds or the timeout expires (0xffffffff = forever); g_kernel_mutex is held by `lock`.
+// Waits until `pred` holds or the timeout expires (0xffffffff = forever); g_kernel_mutex is held by `lock`. The
+// thread sleeps on its own condition variable, registered with each object it waits for, so a signal wakes only
+// that object's waiters (the engine's job system signals and waits tens of thousands of times a second).
 template <typename Pred>
-bool WaitKernel(std::unique_lock<std::mutex>& lock, uint32_t ms, Pred pred) {
+bool WaitKernel(std::unique_lock<std::mutex>& lock, uint32_t ms, KObject* const* objs, size_t n, Pred pred) {
+    if (pred()) return true;
+    if (ms == 0) return false;
+    thread_local KWaiter self;
+    for (size_t i = 0; i < n; ++i)
+        if (objs[i]) objs[i]->waiters.push_back(&self);
+    bool ok;
     if (ms == 0xffffffffu) {
-        g_kernel_cv.wait(lock, pred);
-        return true;
+        self.cv.wait(lock, pred);
+        ok = true;
+    } else {
+        ok = self.cv.wait_for(lock, std::chrono::milliseconds(ms), pred);
     }
-    return g_kernel_cv.wait_for(lock, std::chrono::milliseconds(ms), pred);
+    for (size_t i = 0; i < n; ++i) {
+        if (!objs[i]) continue;
+        auto& w = objs[i]->waiters;
+        for (size_t k = 0; k < w.size(); ++k) {
+            if (w[k] == &self) {
+                w[k] = w.back();
+                w.pop_back();
+                break;
+            }
+        }
+    }
+    return ok;
 }
 
 // ---- files ----
@@ -346,10 +367,18 @@ void WriteSystemTime(uint32_t out, const struct tm& t, int ms) {
 std::mutex g_cs_mutex;
 std::unordered_map<uint32_t, std::recursive_mutex*> g_cs;
 
-std::recursive_mutex* CriticalSection(uint32_t cs) {
+std::recursive_mutex* CriticalSectionSlow(uint32_t cs) {
     std::lock_guard<std::mutex> lock(g_cs_mutex);
     auto& m = g_cs[cs];
     if (!m) m = new std::recursive_mutex();
+    return m;
+}
+
+// The mapping never changes (DeleteCriticalSection keeps the mutex), so each thread caches its lookups.
+std::recursive_mutex* CriticalSection(uint32_t cs) {
+    thread_local std::unordered_map<uint32_t, std::recursive_mutex*> cache;
+    auto& m = cache[cs];
+    if (!m) m = CriticalSectionSlow(cs);
     return m;
 }
 
@@ -532,7 +561,7 @@ K(CreateThread) {
         std::lock_guard<std::mutex> lock(g_kernel_mutex);
         t->exit_code = code;
         t->done = true;
-        g_kernel_cv.notify_all();
+        t->Notify();
     }).detach();
     while (!id.load()) std::this_thread::yield();
     if (tid_out) W32(tid_out, id.load());
@@ -661,8 +690,10 @@ K(CreateEventA) { Return(c, NewHandle(new Event(Arg(c, 1) != 0, Arg(c, 2) != 0))
 K(SetEvent) {
     auto* e = static_cast<Event*>(HandleObject(Arg(c, 0)));
     std::lock_guard<std::mutex> lock(g_kernel_mutex);
-    if (e && e->type == KType::Event) e->state = true;
-    g_kernel_cv.notify_all();
+    if (e && e->type == KType::Event) {
+        e->state = true;
+        e->Notify();
+    }
     Return(c, e ? 1 : 0, 1);
 }
 K(ResetEvent) {
@@ -681,7 +712,7 @@ K(ReleaseSemaphore) {
     }
     if (Arg(c, 2)) W32(Arg(c, 2), uint32_t(s->count));
     s->count += int32_t(Arg(c, 1));
-    g_kernel_cv.notify_all();
+    s->Notify();
     Return(c, 1, 3);
 }
 K(CreateMutexA) {
@@ -698,7 +729,7 @@ K(WaitForSingleObject) {
     }
     uint32_t tid = CurrentTid();
     std::unique_lock<std::mutex> lock(g_kernel_mutex);
-    bool ok = WaitKernel(lock, Arg(c, 1), [&] { return o->Signaled(tid); });
+    bool ok = WaitKernel(lock, Arg(c, 1), &o, 1, [&] { return o->Signaled(tid); });
     if (ok) o->Acquire(tid);
     Return(c, ok ? 0 : 0x102, 2);  // WAIT_OBJECT_0 / WAIT_TIMEOUT
 }
@@ -709,7 +740,7 @@ K(WaitForMultipleObjects) {
     uint32_t tid = CurrentTid();
     uint32_t which = 0x102;
     std::unique_lock<std::mutex> lock(g_kernel_mutex);
-    WaitKernel(lock, ms, [&] {
+    WaitKernel(lock, ms, objs.data(), objs.size(), [&] {
         if (all) {
             for (KObject* o : objs)
                 if (!o || !o->Signaled(tid)) return false;
@@ -785,8 +816,10 @@ void CompleteOverlapped(uint32_t ov, uint32_t bytes) {
     if (uint32_t ev = R32(ov + 16)) {
         auto* e = static_cast<Event*>(HandleObject(ev & ~1u));
         std::lock_guard<std::mutex> lock(g_kernel_mutex);
-        if (e && e->type == KType::Event) e->state = true;
-        g_kernel_cv.notify_all();
+        if (e && e->type == KType::Event) {
+            e->state = true;
+            e->Notify();
+        }
     }
 }
 K(ReadFile) {

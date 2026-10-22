@@ -39,8 +39,10 @@ import java.util.Map;
  *
  * Modes (button in the top-left corner):
  *  - menu: a touch is a left mouse click at that point (menus are mouse-driven), plus Enter and Esc;
- *  - game: a stick on the left (WASD), action buttons on the right, dragging anywhere else turns the camera.
- * The gear opens the settings panel; the performance overlay shows FPS, frame time and memory.
+ *  - game: a stick on the left (WASD; pushed to the rim it also sprints), the action buttons in an arc around the
+ *    big attack button under the right thumb, dragging anywhere else turns the camera.
+ * The gear opens the settings panel; from there the layout editor lets the player drag every control to where
+ * their thumbs rest. The performance overlay shows FPS, frame time and memory.
  */
 public class TouchControls extends View implements InputManager.InputDeviceListener {
     // Performance counters and the frame limiter of the native host (main.cpp).
@@ -52,21 +54,30 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
     private static final int MOUSE_LEFT = 1, MOUSE_RIGHT = 2;
     private static final int RED = 0xffe0261e, RED_DIM = 0xff7a1410, INK = 0xff0b0b0b;
 
-    /** A hexagonal button: a key (Android keycode) or a mouse button. Position in fractions of the view. */
+    /**
+     * A hexagonal button: a key (Android keycode) or a mouse button. Its default place is a dp offset from a corner
+     * (right/bottom when the flags say so), scaled with the buttons so a cluster stays tight; the layout editor
+     * replaces it with a position in fractions of the view.
+     */
     private static final class Button {
         final String label;
         final int keycode, mouseButton;
-        final float fx, fy, sizeDp;
+        final boolean fromRight, fromBottom;
+        final float dx, dy, sizeDp;
         final boolean gameOnly;
+        float customX = -1, customY = -1;
         float cx, cy, r;
         int pointer = -1;
 
-        Button(String label, int keycode, int mouseButton, float fx, float fy, float sizeDp, boolean gameOnly) {
+        Button(String label, int keycode, int mouseButton, boolean fromRight, float dx, boolean fromBottom, float dy,
+                float sizeDp, boolean gameOnly) {
             this.label = label;
             this.keycode = keycode;
             this.mouseButton = mouseButton;
-            this.fx = fx;
-            this.fy = fy;
+            this.fromRight = fromRight;
+            this.dx = dx;
+            this.fromBottom = fromBottom;
+            this.dy = dy;
             this.sizeDp = sizeDp;
             this.gameOnly = gameOnly;
         }
@@ -77,22 +88,24 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
         }
     }
 
+    // Right thumb: УДАР in the corner, the inner arc (radius ~105 dp around it) for СПЕЦ / ЗАХВАТ / ПРЫЖОК, the
+    // outer arc (~190 dp) for the rarer ЦЕЛЬ and БЕГ. Menu keys and СИЛЫ along the top edge.
     private final Button[] buttons = {
-        new Button("ENTER", KeyEvent.KEYCODE_ENTER, 0, 0.19f, 0.10f, 24, false),
-        new Button("ESC", KeyEvent.KEYCODE_ESCAPE, 0, 0.86f, 0.10f, 24, false),
-        new Button("УДАР", 0, MOUSE_LEFT, 0.90f, 0.74f, 44, true),
-        new Button("СПЕЦ", 0, MOUSE_RIGHT, 0.79f, 0.87f, 34, true),
-        new Button("ПРЫЖОК", KeyEvent.KEYCODE_SPACE, 0, 0.93f, 0.47f, 34, true),
-        new Button("ЗАХВАТ", KeyEvent.KEYCODE_E, 0, 0.79f, 0.62f, 31, true),
-        new Button("БЕГ", KeyEvent.KEYCODE_SHIFT_LEFT, 0, 0.68f, 0.88f, 29, true),
-        new Button("ЦЕЛЬ", KeyEvent.KEYCODE_Q, 0, 0.83f, 0.38f, 27, true),
-        new Button("СИЛЫ", KeyEvent.KEYCODE_TAB, 0, 0.70f, 0.10f, 24, true),
+        new Button("ENTER", KeyEvent.KEYCODE_ENTER, 0, false, 160, false, 33, 24, false),
+        new Button("ESC", KeyEvent.KEYCODE_ESCAPE, 0, true, 100, false, 33, 24, false),
+        new Button("УДАР", 0, MOUSE_LEFT, true, 78, true, 74, 46, true),
+        new Button("СПЕЦ", 0, MOUSE_RIGHT, true, 183, true, 62, 33, true),
+        new Button("ЗАХВАТ", KeyEvent.KEYCODE_E, 0, true, 158, true, 150, 31, true),
+        new Button("ПРЫЖОК", KeyEvent.KEYCODE_SPACE, 0, true, 66, true, 180, 33, true),
+        new Button("ЦЕЛЬ", KeyEvent.KEYCODE_Q, 0, true, 258, true, 140, 27, true),
+        new Button("БЕГ", KeyEvent.KEYCODE_SHIFT_LEFT, 0, true, 168, true, 245, 27, true),
+        new Button("СИЛЫ", KeyEvent.KEYCODE_TAB, 0, true, 190, false, 33, 24, true),
     };
 
     // ---- settings ----
     private final SharedPreferences prefs;
     private float opacity, scale;
-    private boolean vibrate, showFps, hideWithPad;
+    private boolean vibrate, showFps, hideWithPad, autoRun;
     private boolean padConnected;
 
     private static final class Setting {
@@ -129,10 +142,21 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
         new Setting("Вибрация", "ui_vibrate", new String[] {"Выкл", "Вкл"}, new int[] {0, 1}, false),
         new Setting("Показ FPS", "ui_fps", new String[] {"Выкл", "Вкл"}, new int[] {0, 1}, false),
         new Setting("Скрывать при геймпаде", "ui_hide_pad", new String[] {"Выкл", "Вкл"}, new int[] {0, 1}, false),
+        new Setting("Бег стиком до края", "ui_autorun", new String[] {"Выкл", "Вкл"}, new int[] {0, 1}, false),
     };
-    private static final int[] DEFAULTS = {1, 1, 0, 2, 1, 1, 0, 1};
+    private static final int[] DEFAULTS = {1, 1, 0, 2, 1, 1, 0, 1, 1};
     private boolean panelOpen = false, restartNeeded = false;
-    private final RectF panel = new RectF(), restartRect = new RectF(), closeRect = new RectF();
+    private final RectF panel = new RectF(), restartRect = new RectF(), closeRect = new RectF(),
+            layoutRect = new RectF();
+
+    // ---- layout editor ----
+    private boolean editing = false;
+    private final RectF doneRect = new RectF(), resetRect = new RectF();
+    private Button dragButton;
+    private boolean dragStick;
+    private int dragPointer = -1;
+    private float dragDx, dragDy;
+    private float stickCustomX = -1, stickCustomY = -1;
     private final List<RectF> leftArrows = new ArrayList<>(), rightArrows = new ArrayList<>();
 
     // ---- drawing ----
@@ -148,6 +172,7 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
     private float stickHomeX, stickHomeY, stickX, stickY, stickR, knobX, knobY;
     private int stickPointer = -1;
     private final boolean[] dirDown = new boolean[4];  // W A S D
+    private boolean stickRun, runButtonHeld, shiftDown;  // Shift comes from the rim of the stick or БЕГ
     private static final int[] DIR_KEYS = {KeyEvent.KEYCODE_W, KeyEvent.KEYCODE_A, KeyEvent.KEYCODE_S, KeyEvent.KEYCODE_D};
 
     // camera / menu pointer
@@ -164,6 +189,7 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
             Setting s = settings[i];
             s.index = Math.max(0, Math.min(s.values.length - 1, prefs.getInt(s.key, DEFAULTS[i])));
         }
+        loadLayout();
         applyUiSettings();
         Typeface face = Typeface.create("sans-serif-condensed", Typeface.BOLD);
         text.setTypeface(face);
@@ -223,6 +249,39 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
         vibrate = settings[5].value() != 0;
         showFps = settings[6].value() != 0;
         hideWithPad = settings[7].value() != 0;
+        autoRun = settings[8].value() != 0;
+        layoutButtons(getWidth(), getHeight());
+    }
+
+    private void loadLayout() {
+        for (int i = 0; i < buttons.length; i++) {
+            buttons[i].customX = prefs.getFloat("pos" + i + "x", -1);
+            buttons[i].customY = prefs.getFloat("pos" + i + "y", -1);
+        }
+        stickCustomX = prefs.getFloat("stick_x", -1);
+        stickCustomY = prefs.getFloat("stick_y", -1);
+    }
+
+    private void saveLayout() {
+        int w = Math.max(1, getWidth()), h = Math.max(1, getHeight());
+        SharedPreferences.Editor ed = prefs.edit();
+        for (int i = 0; i < buttons.length; i++) {
+            Button b = buttons[i];
+            if (b.customX < 0) continue;
+            ed.putFloat("pos" + i + "x", b.cx / w).putFloat("pos" + i + "y", b.cy / h);
+        }
+        if (stickCustomX >= 0) ed.putFloat("stick_x", stickHomeX / w).putFloat("stick_y", stickHomeY / h);
+        ed.apply();
+    }
+
+    private void resetLayout() {
+        SharedPreferences.Editor ed = prefs.edit();
+        for (int i = 0; i < buttons.length; i++) {
+            buttons[i].customX = buttons[i].customY = -1;
+            ed.remove("pos" + i + "x").remove("pos" + i + "y");
+        }
+        stickCustomX = stickCustomY = -1;
+        ed.remove("stick_x").remove("stick_y").apply();
         layoutButtons(getWidth(), getHeight());
     }
 
@@ -260,19 +319,30 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
     }
 
     private void layoutButtons(int w, int h) {
+        final float u = density * scale;
         for (Button b : buttons) {
-            b.cx = b.fx * w;
-            b.cy = b.fy * h;
-            b.r = b.sizeDp * density * scale;
+            b.r = b.sizeDp * u;
+            if (b.customX >= 0) {
+                b.cx = b.customX * w;
+                b.cy = b.customY * h;
+            } else {
+                b.cx = b.fromRight ? w - b.dx * u : b.dx * u;
+                b.cy = b.fromBottom ? h - b.dy * u : b.dy * u;
+            }
         }
-        stickR = 62 * density * scale;
-        stickHomeX = 0.13f * w;
-        stickHomeY = 0.70f * h;
+        stickR = 62 * u;
+        if (stickCustomX >= 0) {
+            stickHomeX = stickCustomX * w;
+            stickHomeY = stickCustomY * h;
+        } else {
+            stickHomeX = 118 * u;
+            stickHomeY = h - 104 * u;
+        }
         stickX = knobX = stickHomeX;
         stickY = knobY = stickHomeY;
         modeRect.set(14 * density, 14 * density, 110 * density, 52 * density);
         gearRect.set(w - 58 * density, 12 * density, w - 14 * density, 56 * density);
-        float pw = Math.min(w * 0.62f, 560 * density), ph = Math.min(h * 0.86f, 470 * density);
+        float pw = Math.min(w * 0.66f, 600 * density), ph = Math.min(h * 0.94f, 500 * density);
         panel.set((w - pw) / 2, (h - ph) / 2, (w + pw) / 2, (h + ph) / 2);
     }
 
@@ -309,6 +379,7 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
         pointerButton.put(pointer, b);
         buzz();
         if (b.mouseButton != 0) mouseButton(b.mouseButton, true, lastMouseX, lastMouseY);
+        else if (b.keycode == KeyEvent.KEYCODE_SHIFT_LEFT) setRun(stickRun, true);
         else key(b.keycode, true);
     }
 
@@ -316,7 +387,18 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
         pointerButton.remove(b.pointer);
         b.pointer = -1;
         if (b.mouseButton != 0) mouseButton(b.mouseButton, false, lastMouseX, lastMouseY);
+        else if (b.keycode == KeyEvent.KEYCODE_SHIFT_LEFT) setRun(stickRun, false);
         else key(b.keycode, false);
+    }
+
+    private void setRun(boolean fromStick, boolean fromButton) {
+        stickRun = fromStick;
+        runButtonHeld = fromButton;
+        boolean want = stickRun || runButtonHeld;
+        if (want != shiftDown) {
+            shiftDown = want;
+            key(KeyEvent.KEYCODE_SHIFT_LEFT, want);
+        }
     }
 
     private void updateStick(float x, float y) {
@@ -336,6 +418,9 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
                 key(DIR_KEYS[i], want[i]);
             }
         }
+        // Pushed to the rim (with hysteresis): sprint, as with Shift held.
+        boolean run = autoRun && stickPointer >= 0 && len > stickR * (stickRun ? 0.85f : 0.95f);
+        if (run != stickRun) setRun(run, runButtonHeld);
     }
 
     private void releaseStick() {
@@ -348,12 +433,90 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
     private void releaseAll() {
         for (Button b : buttons) if (b.pointer >= 0) release(b);
         if (stickPointer >= 0) releaseStick();
+        setRun(false, false);
         if (lookPointer >= 0 && !gameMode) mouseButton(MOUSE_LEFT, false, lookX, lookY);
         lookPointer = -1;
     }
 
     private boolean visible(Button b) {
-        return !controlsHidden() && (gameMode || !b.gameOnly);
+        return editing || (!controlsHidden() && (gameMode || !b.gameOnly));
+    }
+
+    // ---- layout editor ----
+    private void startEditing() {
+        releaseAll();
+        panelOpen = false;
+        editing = true;
+    }
+
+    private void editTouch(MotionEvent e, int action, int id, float x, float y) {
+        switch (action) {
+            case MotionEvent.ACTION_DOWN:
+            case MotionEvent.ACTION_POINTER_DOWN:
+                if (dragPointer >= 0) break;
+                if (doneRect.contains(x, y)) {
+                    saveLayout();
+                    editing = false;
+                    buzz();
+                    break;
+                }
+                if (resetRect.contains(x, y)) {
+                    resetLayout();
+                    buzz();
+                    break;
+                }
+                for (Button b : buttons) {
+                    if (b.hit(x, y)) {
+                        dragButton = b;
+                        dragDx = b.cx - x;
+                        dragDy = b.cy - y;
+                        break;
+                    }
+                }
+                if (dragButton == null) {
+                    float dx = x - stickHomeX, dy = y - stickHomeY;
+                    if (dx * dx + dy * dy <= stickR * stickR) {
+                        dragStick = true;
+                        dragDx = stickHomeX - x;
+                        dragDy = stickHomeY - y;
+                    }
+                }
+                if (dragButton != null || dragStick) {
+                    dragPointer = id;
+                    buzz();
+                }
+                break;
+            case MotionEvent.ACTION_MOVE: {
+                int i = e.findPointerIndex(dragPointer);
+                if (i < 0) break;
+                float w = getWidth(), h = getHeight();
+                float nx = Math.max(0, Math.min(w, e.getX(i) + dragDx));
+                float ny = Math.max(0, Math.min(h, e.getY(i) + dragDy));
+                if (dragButton != null) {
+                    dragButton.cx = nx;
+                    dragButton.cy = ny;
+                    dragButton.customX = nx / w;
+                    dragButton.customY = ny / h;
+                } else if (dragStick) {
+                    stickHomeX = stickX = knobX = nx;
+                    stickHomeY = stickY = knobY = ny;
+                    stickCustomX = nx / w;
+                    stickCustomY = ny / h;
+                }
+                break;
+            }
+            case MotionEvent.ACTION_UP:
+            case MotionEvent.ACTION_POINTER_UP:
+            case MotionEvent.ACTION_CANCEL:
+                if (action == MotionEvent.ACTION_CANCEL || id == dragPointer) {
+                    dragPointer = -1;
+                    dragButton = null;
+                    dragStick = false;
+                }
+                break;
+            default:
+                break;
+        }
     }
 
     // ---- touch ----
@@ -365,6 +528,11 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
         float x = e.getX(index), y = e.getY(index);
         if (panelOpen) {
             if (action == MotionEvent.ACTION_UP) panelTap(x, y);
+            invalidate();
+            return true;
+        }
+        if (editing) {
+            editTouch(e, action, id, x, y);
             invalidate();
             return true;
         }
@@ -463,6 +631,10 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
         }
         if (restartNeeded && restartRect.contains(x, y)) {
             restartApp();
+            return;
+        }
+        if (layoutRect.contains(x, y)) {
+            startEditing();
             return;
         }
         for (int i = 0; i < settings.length; i++) {
@@ -648,7 +820,7 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
         text.setTextSize(13 * density);
         text.setTextAlign(Paint.Align.LEFT);
         text.setColor(fps >= 50 ? 0xff7dff7a : fps >= 28 ? 0xffffd060 : 0xffff5a4a);
-        c.drawText(line, 124 * density, 39 * density, text);
+        c.drawText(line, 16 * density, 74 * density, text);
         text.setTextAlign(Paint.Align.CENTER);
     }
 
@@ -667,7 +839,7 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
         text.setTextSize(20 * density);
         text.setColor(RED);
         c.drawText("НАСТРОЙКИ", panel.centerX(), panel.top + 36 * density, text);
-        float rowH = (panel.height() - 120 * density) / settings.length;
+        float rowH = (panel.height() - 116 * density) / settings.length;
         float top = panel.top + 54 * density;
         leftArrows.clear();
         rightArrows.clear();
@@ -695,12 +867,13 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
             c.drawLine(panel.left + pad, y + rowH / 2, panel.right - pad, y + rowH / 2, edge);
         }
         text.setTextAlign(Paint.Align.CENTER);
-        float by = panel.bottom - 40 * density;
-        closeRect.set(panel.centerX() + 10 * density, by - 18 * density, panel.centerX() + 150 * density,
-                by + 18 * density);
+        float by = panel.bottom - 36 * density, pillW = 150 * density, gap = 12 * density;
+        float cx = panel.centerX();
+        layoutRect.set(cx - pillW * 1.5f - gap, by - 18 * density, cx - pillW * 0.5f - gap, by + 18 * density);
+        drawPill(c, layoutRect, "РАСКЛАДКА", false);
+        closeRect.set(cx + pillW * 0.5f + gap, by - 18 * density, cx + pillW * 1.5f + gap, by + 18 * density);
         drawPill(c, closeRect, "ЗАКРЫТЬ", false);
-        restartRect.set(panel.centerX() - 150 * density, by - 18 * density, panel.centerX() - 10 * density,
-                by + 18 * density);
+        restartRect.set(cx - pillW * 0.5f, by - 18 * density, cx + pillW * 0.5f, by + 18 * density);
         if (restartNeeded) {
             drawPill(c, restartRect, "ПЕРЕЗАПУСК", true);
         } else {
@@ -710,8 +883,26 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
         }
     }
 
+    private void drawEditor(Canvas c) {
+        c.drawColor(0x66000000);
+        drawStick(c);
+        for (Button b : buttons) drawButton(c, b);
+        float cx = getWidth() / 2f, top = 16 * density;
+        text.setTextSize(15 * density);
+        text.setColor(0xffffe0dc);
+        c.drawText("Перетащите кнопки и стик", cx, top + 70 * density, text);
+        resetRect.set(cx - 162 * density, top, cx - 12 * density, top + 38 * density);
+        doneRect.set(cx + 12 * density, top, cx + 162 * density, top + 38 * density);
+        drawPill(c, resetRect, "СБРОС", false);
+        drawPill(c, doneRect, "ГОТОВО", true);
+    }
+
     @Override
     protected void onDraw(Canvas canvas) {
+        if (editing) {
+            drawEditor(canvas);
+            return;
+        }
         if (!controlsHidden()) drawPill(canvas, modeRect, gameMode ? "ИГРА" : "МЕНЮ", gameMode);
         drawGear(canvas);
         if (showFps) drawPerf(canvas);

@@ -30,6 +30,21 @@ index 5679c1a..21d6ed6 100644
  
      // SM2 level hardware
      enabled.core.features.occlusionQueryPrecise = VK_TRUE;
+diff --git a/src/d3d9/d3d9_device.h b/src/d3d9/d3d9_device.h
+index c307036..3fbfe44 100644
+--- a/src/d3d9/d3d9_device.h
++++ b/src/d3d9/d3d9_device.h
+@@ -957,6 +957,10 @@ namespace dxvk {
+       return m_multithread.AcquireLock();
+     }
+ 
++    D3D9DeviceMutex* DeviceMutex() {
++      return m_multithread.Mutex();
++    }
++
+     const D3D9Options* GetOptions() const {
+       return &m_d3d9Options;
+     }
 diff --git a/src/d3d9/d3d9_fixed_function.cpp b/src/d3d9/d3d9_fixed_function.cpp
 index a47f89c..2d2f927 100644
 --- a/src/d3d9/d3d9_fixed_function.cpp
@@ -63,7 +78,7 @@ index a47f89c..2d2f927 100644
      emitLightTypeDecl();
      emitBaseBufferDecl();
 diff --git a/src/d3d9/d3d9_multithread.h b/src/d3d9/d3d9_multithread.h
-index f91857b..56d4bc0 100644
+index f91857b..64c0316 100644
 --- a/src/d3d9/d3d9_multithread.h
 +++ b/src/d3d9/d3d9_multithread.h
 @@ -1,9 +1,19 @@
@@ -104,7 +119,16 @@ index f91857b..56d4bc0 100644
  
    };
  
-@@ -70,7 +80,7 @@ namespace dxvk {
+@@ -66,11 +76,16 @@ namespace dxvk {
+         : D3D9DeviceLock();
+     }
+ 
++    // Android port: the device mutex if the device is multithreaded, for Present to drop it while it waits.
++    D3D9DeviceMutex* Mutex() {
++      return m_protected ? &m_mutex : nullptr;
++    }
++
+   private:
  
      BOOL            m_protected;
  
@@ -113,6 +137,124 @@ index f91857b..56d4bc0 100644
  
    };
  
+diff --git a/src/d3d9/d3d9_swapchain.cpp b/src/d3d9/d3d9_swapchain.cpp
+index 391cec8..0925853 100644
+--- a/src/d3d9/d3d9_swapchain.cpp
++++ b/src/d3d9/d3d9_swapchain.cpp
+@@ -5,6 +5,8 @@
+ #include "d3d9_hud.h"
+ #include "d3d9_window.h"
+ 
++#include <chrono>
++
+ namespace dxvk {
+ 
+   static uint16_t MapGammaControlPoint(float x) {
+@@ -818,7 +820,35 @@ namespace dxvk {
+   }
+ 
+ 
++#ifdef __ANDROID__
++  // Android port: Present waits for the previous present's submission, a free swap chain image and the frame
++  // latency limit. Holding the device lock meanwhile stalls every other thread's buffer locks behind the GPU (the
++  // engine fills vertex buffers from its worker threads), so these waits run unlocked; Present is the only user of
++  // the swap chain state they touch. Present is entered with the lock taken exactly once (D3D9SwapChainEx::Present).
++  struct D3D9PresentUnlocked {
++    D3D9DeviceMutex* m;
++    explicit D3D9PresentUnlocked(D3D9DeviceEx* device) : m(device->DeviceMutex()) { if (m) m->unlock(); }
++    ~D3D9PresentUnlocked() { if (m) m->lock(); }
++  };
++
++  // DXVK_PRESENT_STATS=1: where Present's time goes, logged every 300 frames.
++  struct D3D9PresentStats {
++    bool on = false;
++    uint64_t frames = 0;
++    double submit = 0, acquire = 0, latency = 0, total = 0;
++    static double now() {
++      return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
++    }
++  };
++  static D3D9PresentStats g_presentStats;
++#endif
++
+   void D3D9SwapChainEx::PresentImage(UINT SyncInterval) {
++#ifdef __ANDROID__
++    static const bool statsOn = env::getEnvVar("DXVK_PRESENT_STATS") == "1";  // read after the host set it
++    g_presentStats.on = statsOn;
++    const double tStart = g_presentStats.on ? D3D9PresentStats::now() : 0;
++#endif
+     m_parent->EndFrame();
+     m_parent->Flush();
+ 
+@@ -827,7 +857,19 @@ namespace dxvk {
+     Rc<DxvkImageView> swapImageView = m_backBuffers[0]->GetImageView(false);
+ 
+     for (uint32_t i = 0; i < SyncInterval || i < 1; i++) {
++#ifdef __ANDROID__
++      VkResult submitStatus;
++      double t0 = g_presentStats.on ? D3D9PresentStats::now() : 0;
++      {
++        D3D9PresentUnlocked unlocked(m_parent);
++        submitStatus = m_device->waitForSubmission(&m_presentStatus);
++      }
++      double t1 = g_presentStats.on ? D3D9PresentStats::now() : 0;
++      if (submitStatus != VK_SUCCESS)
++        RecreateSwapChain();
++#else
+       SynchronizePresent();
++#endif
+ 
+       // Presentation semaphores and WSI swap chain image
+       PresenterInfo info = m_wctx->presenter->info();
+@@ -835,7 +877,19 @@ namespace dxvk {
+ 
+       uint32_t imageIndex = 0;
+ 
++#ifdef __ANDROID__
++      VkResult status;
++      {
++        D3D9PresentUnlocked unlocked(m_parent);
++        status = m_wctx->presenter->acquireNextImage(sync, imageIndex);
++      }
++      if (g_presentStats.on) {
++        g_presentStats.submit += t1 - t0;
++        g_presentStats.acquire += D3D9PresentStats::now() - t1;
++      }
++#else
+       VkResult status = m_wctx->presenter->acquireNextImage(sync, imageIndex);
++#endif
+ 
+       while (status != VK_SUCCESS) {
+         RecreateSwapChain();
+@@ -913,7 +967,28 @@ namespace dxvk {
+       m_parent->FlushCsChunk();
+     }
+ 
++#ifdef __ANDROID__
++    {
++      double t0 = g_presentStats.on ? D3D9PresentStats::now() : 0;
++      {
++        D3D9PresentUnlocked unlocked(m_parent);
++        SyncFrameLatency();
++      }
++      if (g_presentStats.on) {
++        double t1 = D3D9PresentStats::now();
++        g_presentStats.latency += t1 - t0;
++        g_presentStats.total += t1 - tStart;
++        if (++g_presentStats.frames == 300) {
++          Logger::info(str::format("present: per frame ", g_presentStats.total / 300, " ms: submit wait ",
++            g_presentStats.submit / 300, " acquire ", g_presentStats.acquire / 300, " latency wait ",
++            g_presentStats.latency / 300, " (frame latency ", GetActualFrameLatency(), ")"));
++          g_presentStats = D3D9PresentStats();
++        }
++      }
++    }
++#else
+     SyncFrameLatency();
++#endif
+ 
+     // Rotate swap chain buffers so that the back
+     // buffer at index 0 becomes the front buffer.
 diff --git a/src/dxso/dxso_compiler.cpp b/src/dxso/dxso_compiler.cpp
 index d7cdc67..29299ee 100644
 --- a/src/dxso/dxso_compiler.cpp
