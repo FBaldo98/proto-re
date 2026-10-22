@@ -209,6 +209,12 @@ int main(int argc, char** argv) {
     InitD3D9Bridge();
     setenv("DXVK_WSI_DRIVER", "SDL2", 0);  // DXVK native: the HWNDs we pass are SDL windows
     if (SettingInt("present_stats", 0)) setenv("DXVK_PRESENT_STATS", "1", 0);  // Present timing in the DXVK log
+    // dxvk_config = d3d9.presentInterval = 1, d3d9.numBackBuffers = 3  (DXVK options; ',' as ';' starts an ini
+    // comment)
+    if (std::string dc = Setting("dxvk_config", ""); !dc.empty()) {
+        for (char& ch : dc) ch = ch == ',' ? ';' : ch;
+        setenv("DXVK_CONFIG", dc.c_str(), 0);
+    }
 
     // The game window: DXVK's native WSI takes the SDL window as HWND.
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_GAMECONTROLLER) != 0) Fatal("SDL_Init: %s", SDL_GetError());

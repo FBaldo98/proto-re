@@ -39,7 +39,7 @@ import java.util.Map;
  *
  * Modes (button in the top-left corner):
  *  - menu: a touch is a left mouse click at that point (menus are mouse-driven), plus Enter and Esc;
- *  - game: a stick on the left (WASD; pushed to the rim it also sprints), the action buttons in an arc around the
+ *  - game: a stick on the left (WASD; optionally sprints at the rim), the action buttons in an arc around the
  *    big attack button under the right thumb, dragging anywhere else turns the camera.
  * The gear opens the settings panel; from there the layout editor lets the player drag every control to where
  * their thumbs rest. The performance overlay shows FPS, frame time and memory.
@@ -51,7 +51,7 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
     static native int nativeMemoryMiB();
     static native void nativeSetFpsLimit(int fps);
 
-    private static final int MOUSE_LEFT = 1, MOUSE_RIGHT = 2;
+    private static final int MOUSE_LEFT = 1, MOUSE_RIGHT = 2, MOUSE_MIDDLE = 4;
     private static final int RED = 0xffe0261e, RED_DIM = 0xff7a1410, INK = 0xff0b0b0b;
 
     /**
@@ -98,7 +98,7 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
         new Button("СПЕЦ", 0, MOUSE_RIGHT, true, 183, true, 62, 33, true),
         new Button("ЗАХВАТ", KeyEvent.KEYCODE_E, 0, true, 158, true, 150, 31, true),
         new Button("ПРЫЖОК", KeyEvent.KEYCODE_SPACE, 0, true, 66, true, 180, 33, true),
-        new Button("ЦЕЛЬ", KeyEvent.KEYCODE_Q, 0, true, 258, true, 140, 27, true),
+        new Button("ЦЕЛЬ", 0, MOUSE_MIDDLE, true, 258, true, 140, 27, true),  // lock-on: middle button on PC
         new Button("БЕГ", KeyEvent.KEYCODE_SHIFT_LEFT, 0, true, 168, true, 245, 27, true),
         new Button("СИЛЫ", KeyEvent.KEYCODE_TAB, 0, true, 190, false, 33, 24, true),
     };
@@ -143,9 +143,9 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
         new Setting("Вибрация", "ui_vibrate", new String[] {"Выкл", "Вкл"}, new int[] {0, 1}, false),
         new Setting("Показ FPS", "ui_fps", new String[] {"Выкл", "Вкл"}, new int[] {0, 1}, false),
         new Setting("Скрывать при геймпаде", "ui_hide_pad", new String[] {"Выкл", "Вкл"}, new int[] {0, 1}, false),
-        new Setting("Бег стиком до края", "ui_autorun", new String[] {"Выкл", "Вкл"}, new int[] {0, 1}, false),
+        new Setting("Бег стиком до края", "ui_stick_run", new String[] {"Выкл", "Вкл"}, new int[] {0, 1}, false),
     };
-    private static final int[] DEFAULTS = {1, 1, 0, 2, 1, 1, 0, 1, 1};
+    private static final int[] DEFAULTS = {1, 1, 0, 2, 1, 1, 0, 1, 0};
     private boolean panelOpen = false, restartNeeded = false;
     private final RectF panel = new RectF(), restartRect = new RectF(), closeRect = new RectF(),
             layoutRect = new RectF();
