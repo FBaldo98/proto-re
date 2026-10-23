@@ -7,7 +7,10 @@
 //   EngineTerminate()
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_main.h>  // Android: main() becomes SDL_main, called by SDLActivity
+#include <dlfcn.h>
 #include <sched.h>
+#include <signal.h>
+#include <ucontext.h>
 #include <unistd.h>
 #ifdef __ANDROID__
 #include <android/log.h>
@@ -57,6 +60,69 @@ void Log(const char* fmt, ...) {
     }
 }
 
+namespace {
+
+// Crash report: the fault and the faulting code's library + offset go to the log (and logcat), then the previous
+// handler (Android's debuggerd) takes over. Without it a crash on a user's phone just cuts the log off. Formatting
+// is not strictly async-signal-safe, which is acceptable for a process that is dying anyway.
+struct sigaction g_old_actions[32];
+
+void CrashWrite(const char* text) {
+#ifdef __ANDROID__
+    __android_log_write(ANDROID_LOG_ERROR, "protore", text);
+#else
+    write(2, text, strlen(text));
+    write(2, "\n", 1);
+#endif
+    if (g_log) {
+        int fd = fileno(g_log);
+        write(fd, text, strlen(text));
+        write(fd, "\n", 1);
+        fsync(fd);
+    }
+}
+
+void DescribeAddress(char* out, size_t size, const char* what, uintptr_t address) {
+    Dl_info info{};
+    if (address && dladdr(reinterpret_cast<void*>(address), &info) && info.dli_fname) {
+        const char* lib = strrchr(info.dli_fname, '/');
+        snprintf(out, size, "crash: %s %#lx = %s+%#lx (%s)", what, (unsigned long)address, lib ? lib + 1 : info.dli_fname,
+                 (unsigned long)(address - reinterpret_cast<uintptr_t>(info.dli_fbase)),
+                 info.dli_sname ? info.dli_sname : "?");
+    } else {
+        snprintf(out, size, "crash: %s %#lx", what, (unsigned long)address);
+    }
+}
+
+void OnCrash(int sig, siginfo_t* info, void* context) {
+    char line[512];
+    snprintf(line, sizeof(line), "crash: signal %d (%s) code %d addr %p on tid %d", sig, strsignal(sig), info->si_code,
+             info->si_addr, int(gettid()));
+    CrashWrite(line);
+#if defined(__aarch64__)
+    const auto& mc = static_cast<ucontext_t*>(context)->uc_mcontext;
+    DescribeAddress(line, sizeof(line), "pc", mc.pc);
+    CrashWrite(line);
+    DescribeAddress(line, sizeof(line), "lr", mc.regs[30]);
+    CrashWrite(line);
+#elif defined(__x86_64__)
+    DescribeAddress(line, sizeof(line), "pc", static_cast<ucontext_t*>(context)->uc_mcontext.gregs[REG_RIP]);
+    CrashWrite(line);
+#endif
+    sigaction(sig, &g_old_actions[sig], nullptr);
+    if (info->si_code <= 0) raise(sig);  // sent by kill/tgkill/abort: deliver again; a real fault re-runs on return
+}
+
+void InstallCrashHandler() {
+    struct sigaction sa {};
+    sa.sa_sigaction = OnCrash;
+    sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    sigemptyset(&sa.sa_mask);
+    for (int sig : {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT}) sigaction(sig, &sa, &g_old_actions[sig]);
+}
+
+}  // namespace
+
 void Fatal(const char* fmt, ...) {
     char buf[1024];
     va_list ap;
@@ -72,6 +138,7 @@ void InitClientSize(int window_w, int window_h);
 void StartWatchdog(std::atomic<uint64_t>* frames);  // watchdog.cpp
 void InitD3D9Bridge();  // d3d9.cpp
 void SelectVulkanDriver();  // vulkan_driver.cpp
+void VulkanDriverConfirm();
 void InitInput(uint32_t keyboard_service, uint32_t mouse_service);  // input.cpp
 void ForwardInput(const SDL_Event& e);
 void InjectKey(SDL_Scancode sc, bool down);
@@ -207,6 +274,7 @@ int main(int argc, char** argv) {
         return 2;
     }
     g_log = fopen("proto-native.log", "w");
+    InstallCrashHandler();
     InitGuestMemory();
     AttachThread(8u << 20);
     InitD3D9Bridge();
@@ -299,6 +367,7 @@ int main(int argc, char** argv) {
     uint64_t stats_frames = 0;
     for (uint64_t frame = 0;; ++frame) {
         frames.store(frame, std::memory_order_relaxed);
+        if (frame == 900) VulkanDriverConfirm();  // well past the intro movies: the driver survived startup
         // Frame time, FPS over the last second, a perf line in the log every 30 s, and the optional limiter.
         Clock::time_point now = Clock::now();
         PerfHintFrame(std::chrono::duration_cast<std::chrono::nanoseconds>(now - frame_start).count());

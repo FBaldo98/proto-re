@@ -116,7 +116,37 @@ void LogSystemDevice() {
     if (gipa) ProbeDevice(gipa, "system driver");
 }
 
+// Crash guard (working directory = the app's files folder): turnip_pending holds how many runs in a row ended
+// before VulkanDriverConfirm, i.e. crashed or hung during startup on Turnip. After two of them turnip_failed is
+// written and auto mode stays on the system driver; vulkan_driver = turnip still forces Turnip.
+constexpr const char* kPending = "turnip_pending";
+constexpr const char* kFailed = "turnip_failed";
+bool g_turnip_pending = false;
+
+int PendingRuns() {
+    FILE* f = fopen(kPending, "r");
+    if (!f) return 0;
+    int n = 0;
+    if (fscanf(f, "%d", &n) != 1) n = 1;
+    fclose(f);
+    return n;
+}
+
+void SetPendingRuns(int n) {
+    if (FILE* f = fopen(kPending, "w")) {
+        fprintf(f, "%d\n", n);
+        fclose(f);
+    }
+}
+
 }  // namespace
+
+void VulkanDriverConfirm() {
+    if (!g_turnip_pending) return;
+    g_turnip_pending = false;
+    unlink(kPending);
+    Log("vulkan: Turnip startup ok");
+}
 
 void SelectVulkanDriver() {
     const std::string mode = Setting("vulkan_driver", "auto");
@@ -125,6 +155,18 @@ void SelectVulkanDriver() {
         LogSystemDevice();
         return;
     }
+    const int pending = PendingRuns();
+    if (mode == "auto" && pending >= 2) {
+        unlink(kPending);
+        if (FILE* f = fopen(kFailed, "w")) fclose(f);
+    }
+    if (mode == "auto" && access(kFailed, F_OK) == 0) {
+        Log("vulkan: Turnip crashed during startup before (%s), using the system driver; vulkan_driver = turnip "
+            "forces it", kFailed);
+        LogSystemDevice();
+        return;
+    }
+    if (mode == "turnip") unlink(kFailed);
     const char* libdir = getenv("PROTORE_NATIVE_LIB_DIR");  // set by ProtoActivity: the APK's extracted libraries
     if (!libdir || access((std::string(libdir) + "/libvulkan_freedreno.so").c_str(), F_OK) != 0) {
         Log("vulkan: no bundled Turnip driver, using the system driver");
@@ -135,7 +177,10 @@ void SelectVulkanDriver() {
     const std::string dir = std::string(libdir) + "/";
     void* lib = adrenotools_open_libvulkan(RTLD_NOW, ADRENOTOOLS_DRIVER_CUSTOM, nullptr, dir.c_str(), dir.c_str(),
                                            "libvulkan_freedreno.so", nullptr, nullptr);
-    if (!lib) Log("vulkan: adrenotools could not load Turnip (%s)", dlerror() ? dlerror() : "no dlerror");
+    if (!lib) {
+        const char* err = dlerror();
+        Log("vulkan: adrenotools could not load Turnip (%s)", err ? err : "no dlerror");
+    }
     auto gipa = lib ? DriverGipa(lib) : nullptr;
     const std::string device = gipa ? ProbeDevice(gipa, "Turnip") : "";
     if (device.empty()) {
@@ -146,7 +191,9 @@ void SelectVulkanDriver() {
     char hex[32];
     snprintf(hex, sizeof(hex), "%llx", (unsigned long long)reinterpret_cast<uintptr_t>(gipa));
     setenv("DXVK_VK_GIPA", hex, 1);
-    Log("vulkan: Turnip (Mesa) on %s", device.c_str());
+    Log("vulkan: Turnip (Mesa) on %s%s", device.c_str(), pending ? " (previous run ended during startup)" : "");
+    SetPendingRuns(pending + 1);
+    g_turnip_pending = true;
 }
 
 }  // namespace native
@@ -156,6 +203,7 @@ void SelectVulkanDriver() {
 namespace native {
 
 void SelectVulkanDriver() {}
+void VulkanDriverConfirm() {}
 
 }  // namespace native
 
