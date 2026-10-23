@@ -19,6 +19,7 @@
 - ADPF, чтобы телефон не гонял процессор на максимуме
 
 Pixel 6 (Mali-G78): в меню 60 fps, в игре 38-46 в 720p и 33-42 в 1080p. Сейчас всё упирается в процессор.
+Телефон с Adreno 735: в среднем около 40 fps в 720p.
 
 ## TODO
 
@@ -146,6 +147,10 @@ cd ~/proto-re-data/game && wine prototypef.exe
 Поиск функции, которая ломает игру: `MIN_FRAMES=64 RUN_SECONDS=70 [START_LO=N] tools/recomp/bisect.sh`
 
 </details>
+
+## Тестирование
+
+Спасибо Copyright-1 за тесты на Adreno.
 
 ## Прочее
 

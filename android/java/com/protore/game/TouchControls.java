@@ -16,6 +16,7 @@ import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.hardware.input.InputManager;
 import android.view.HapticFeedbackConstants;
+import android.os.Build;
 import android.view.InputDevice;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
@@ -88,19 +89,19 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
         }
     }
 
-    // Right thumb: УДАР in the corner, the inner arc (radius ~105 dp around it) for СПЕЦ / ЗАХВАТ / ПРЫЖОК, the
-    // outer arc (~190 dp) for the rarer ЦЕЛЬ and БЕГ. Menu keys and СИЛЫ along the top right edge, clear of the
+    // Right thumb: ATTACK in the corner, the inner arc (radius ~105 dp around it) for SPECIAL / GRAB / JUMP, the
+    // outer arc (~190 dp) for the rarer TARGET and SPRINT. Menu keys and POWERS along the top right edge, clear of the
     // health bar.
     private final Button[] buttons = {
         new Button("ENTER", KeyEvent.KEYCODE_ENTER, 0, true, 280, false, 33, 24, false),
         new Button("ESC", KeyEvent.KEYCODE_ESCAPE, 0, true, 100, false, 33, 24, false),
-        new Button("УДАР", 0, MOUSE_LEFT, true, 78, true, 74, 46, true),
-        new Button("СПЕЦ", 0, MOUSE_RIGHT, true, 183, true, 62, 33, true),
-        new Button("ЗАХВАТ", KeyEvent.KEYCODE_E, 0, true, 158, true, 150, 31, true),
-        new Button("ПРЫЖОК", KeyEvent.KEYCODE_SPACE, 0, true, 66, true, 180, 33, true),
-        new Button("ЦЕЛЬ", KeyEvent.KEYCODE_TAB, 0, true, 258, true, 140, 27, true),  // lock-on is Tab on PC
-        new Button("БЕГ", KeyEvent.KEYCODE_SHIFT_LEFT, 0, true, 168, true, 245, 27, true),
-        new Button("СИЛЫ", 0, MOUSE_MIDDLE, true, 190, false, 33, 24, true),  // power wheel: middle button
+        new Button("ATTACK", 0, MOUSE_LEFT, true, 78, true, 74, 46, true),
+        new Button("SPECIAL", 0, MOUSE_RIGHT, true, 183, true, 62, 33, true),
+        new Button("GRAB", KeyEvent.KEYCODE_E, 0, true, 158, true, 150, 31, true),
+        new Button("JUMP", KeyEvent.KEYCODE_SPACE, 0, true, 66, true, 180, 33, true),
+        new Button("TARGET", KeyEvent.KEYCODE_TAB, 0, true, 258, true, 140, 27, true),  // lock-on is Tab on PC
+        new Button("SPRINT", KeyEvent.KEYCODE_SHIFT_LEFT, 0, true, 168, true, 245, 27, true),
+        new Button("POWERS", 0, MOUSE_MIDDLE, true, 190, false, 33, 24, true),  // power wheel: middle button
     };
 
     // ---- settings ----
@@ -131,26 +132,26 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
     }
 
     private final Setting[] settings = {
-        new Setting("Разрешение", "render_height", new String[] {"540p", "720p", "900p", "1080p"},
+        new Setting("Resolution", "render_height", new String[] {"540p", "720p", "900p", "1080p"},
                 new int[] {540, 720, 900, 1080}, true),
-        new Setting("Текстуры", "texture_skip_mips", new String[] {"Полные", "Половина", "Четверть"},
+        new Setting("Textures", "texture_skip_mips", new String[] {"Full", "Half", "Quarter"},
                 new int[] {0, 1, 2}, true),
-        new Setting("Лимит FPS", "fps_limit", new String[] {"Нет", "30", "45", "60"}, new int[] {0, 30, 45, 60},
+        new Setting("FPS limit", "fps_limit", new String[] {"Off", "30", "45", "60"}, new int[] {0, 30, 45, 60},
                 true),
-        new Setting("Экономия батареи", "battery_saver", new String[] {"Выкл", "Вкл"}, new int[] {0, 1}, true),
-        new Setting("Прозрачность", "ui_opacity", new String[] {"40%", "60%", "80%", "100%"},
+        new Setting("Battery saver", "battery_saver", new String[] {"Off", "On"}, new int[] {0, 1}, true),
+        new Setting("Opacity", "ui_opacity", new String[] {"40%", "60%", "80%", "100%"},
                 new int[] {40, 60, 80, 100}, false),
-        new Setting("Размер кнопок", "ui_scale", new String[] {"80%", "100%", "120%", "140%"},
+        new Setting("Button size", "ui_scale", new String[] {"80%", "100%", "120%", "140%"},
                 new int[] {80, 100, 120, 140}, false),
-        new Setting("Вибрация", "ui_vibrate", new String[] {"Выкл", "Вкл"}, new int[] {0, 1}, false),
-        new Setting("Показ FPS", "ui_fps", new String[] {"Выкл", "Вкл"}, new int[] {0, 1}, false),
-        new Setting("Скрывать при геймпаде", "ui_hide_pad", new String[] {"Выкл", "Вкл"}, new int[] {0, 1}, false),
-        new Setting("Бег стиком до края", "ui_stick_run", new String[] {"Выкл", "Вкл"}, new int[] {0, 1}, false),
-        new Setting("Камера", "ui_cam", new String[] {"50%", "75%", "100%", "150%", "200%"},
+        new Setting("Vibration", "ui_vibrate", new String[] {"Off", "On"}, new int[] {0, 1}, false),
+        new Setting("Show FPS", "ui_fps", new String[] {"Off", "On"}, new int[] {0, 1}, false),
+        new Setting("Hide with gamepad", "ui_pad_hide", new String[] {"Off", "On"}, new int[] {0, 1}, false),
+        new Setting("Stick edge sprint", "ui_stick_run", new String[] {"Off", "On"}, new int[] {0, 1}, false),
+        new Setting("Camera speed", "ui_cam", new String[] {"50%", "75%", "100%", "150%", "200%"},
                 new int[] {50, 75, 100, 150, 200}, false),
-        new Setting("Инверсия Y", "ui_invert", new String[] {"Выкл", "Вкл"}, new int[] {0, 1}, false),
+        new Setting("Invert Y", "ui_invert", new String[] {"Off", "On"}, new int[] {0, 1}, false),
     };
-    private static final int[] DEFAULTS = {1, 1, 0, 0, 2, 1, 1, 0, 1, 0, 2, 0};
+    private static final int[] DEFAULTS = {1, 1, 0, 0, 2, 1, 1, 0, 0, 0, 2, 0};
     private boolean panelOpen = false, restartNeeded = false;
     private final RectF panel = new RectF(), restartRect = new RectF(), closeRect = new RectF(),
             layoutRect = new RectF();
@@ -178,7 +179,7 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
     private float stickHomeX, stickHomeY, stickX, stickY, stickR, knobX, knobY;
     private int stickPointer = -1;
     private final boolean[] dirDown = new boolean[4];  // W A S D
-    private boolean stickRun, runButtonHeld, shiftDown;  // Shift comes from the rim of the stick or БЕГ
+    private boolean stickRun, runButtonHeld, shiftDown;  // Shift comes from the rim of the stick or SPRINT
     private static final int[] DIR_KEYS = {KeyEvent.KEYCODE_W, KeyEvent.KEYCODE_A, KeyEvent.KEYCODE_S, KeyEvent.KEYCODE_D};
 
     // camera / menu pointer
@@ -294,12 +295,20 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
     }
 
     // ---- gamepads ----
+    // A real controller has gamepad buttons and a stick (joystick axes). Phones list built-in devices that claim
+    // SOURCE_GAMEPAD too (Xiaomi: fingerprint sensor, side keys), which used to hide the touch controls with no
+    // controller anywhere; those have no joystick axes, and on Android 10+ they are not external.
     private static boolean findGamepad(InputManager im) {
         for (int id : im.getInputDeviceIds()) {
             InputDevice d = im.getInputDevice(id);
-            if (d != null && !d.isVirtual() && (d.getSources() & InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD) {
-                return true;
-            }
+            if (d == null || d.isVirtual()) continue;
+            int sources = d.getSources();
+            if ((sources & InputDevice.SOURCE_GAMEPAD) != InputDevice.SOURCE_GAMEPAD
+                    || (sources & InputDevice.SOURCE_JOYSTICK) != InputDevice.SOURCE_JOYSTICK) continue;
+            if (d.getMotionRange(MotionEvent.AXIS_X, InputDevice.SOURCE_JOYSTICK) == null
+                    || d.getMotionRange(MotionEvent.AXIS_Y, InputDevice.SOURCE_JOYSTICK) == null) continue;
+            if (Build.VERSION.SDK_INT >= 29 && !d.isExternal()) continue;
+            return true;
         }
         return false;
     }
@@ -861,7 +870,7 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
         float pad = 22 * density;
         text.setTextSize(20 * density);
         text.setColor(RED);
-        c.drawText("НАСТРОЙКИ", panel.centerX(), panel.top + 36 * density, text);
+        c.drawText("SETTINGS", panel.centerX(), panel.top + 36 * density, text);
         // two columns of settings
         int rows = (settings.length + 1) / 2;
         float rowH = (panel.height() - 116 * density) / rows;
@@ -897,16 +906,16 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
         float by = panel.bottom - 36 * density, pillW = 150 * density, gap = 12 * density;
         float cx = panel.centerX();
         layoutRect.set(cx - pillW * 1.5f - gap, by - 18 * density, cx - pillW * 0.5f - gap, by + 18 * density);
-        drawPill(c, layoutRect, "РАСКЛАДКА", false);
+        drawPill(c, layoutRect, "LAYOUT", false);
         closeRect.set(cx + pillW * 0.5f + gap, by - 18 * density, cx + pillW * 1.5f + gap, by + 18 * density);
-        drawPill(c, closeRect, "ЗАКРЫТЬ", false);
+        drawPill(c, closeRect, "CLOSE", false);
         restartRect.set(cx - pillW * 0.5f, by - 18 * density, cx + pillW * 0.5f, by + 18 * density);
         if (restartNeeded) {
-            drawPill(c, restartRect, "ПЕРЕЗАПУСК", true);
+            drawPill(c, restartRect, "RESTART", true);
         } else {
             text.setTextSize(11 * density);
             text.setColor(0xff9a8a88);
-            c.drawText("* после перезапуска", restartRect.centerX(), by + 4 * density, text);
+            c.drawText("* applies after restart", restartRect.centerX(), by + 4 * density, text);
         }
     }
 
@@ -917,11 +926,11 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
         float cx = getWidth() / 2f, top = 16 * density;
         text.setTextSize(15 * density);
         text.setColor(0xffffe0dc);
-        c.drawText("Перетащите кнопки и стик", cx, top + 70 * density, text);
+        c.drawText("Drag the buttons and the stick", cx, top + 70 * density, text);
         resetRect.set(cx - 162 * density, top, cx - 12 * density, top + 38 * density);
         doneRect.set(cx + 12 * density, top, cx + 162 * density, top + 38 * density);
-        drawPill(c, resetRect, "СБРОС", false);
-        drawPill(c, doneRect, "ГОТОВО", true);
+        drawPill(c, resetRect, "RESET", false);
+        drawPill(c, doneRect, "DONE", true);
     }
 
     @Override
@@ -930,7 +939,7 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
             drawEditor(canvas);
             return;
         }
-        if (!controlsHidden()) drawPill(canvas, modeRect, gameMode ? "ИГРА" : "МЕНЮ", gameMode);
+        if (!controlsHidden()) drawPill(canvas, modeRect, gameMode ? "GAME" : "MENU", gameMode);
         drawGear(canvas);
         if (showFps) drawPerf(canvas);
         if (gameMode && !controlsHidden()) drawStick(canvas);

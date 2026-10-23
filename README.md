@@ -19,6 +19,7 @@ Runs on the phone: menus, videos, sound, missions, saves. A full playthrough is 
 - ADPF hints so the phone doesn't run the CPU at max all the time
 
 Pixel 6 (Mali-G78): menus 60 fps, gameplay 38-46 at 720p and 33-42 at 1080p. Gameplay is CPU bound right now.
+A phone with Adreno 735: about 40 fps on average at 720p.
 
 ## TODO
 
@@ -145,6 +146,10 @@ cd ~/proto-re-data/game && wine prototypef.exe
 Finding a function that breaks the game: `MIN_FRAMES=64 RUN_SECONDS=70 [START_LO=N] tools/recomp/bisect.sh`
 
 </details>
+
+## Testing
+
+Thanks to Copyright-1 for testing on Adreno.
 
 ## Notes
 
