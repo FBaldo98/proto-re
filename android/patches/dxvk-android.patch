@@ -1,5 +1,5 @@
 diff --git a/src/d3d9/d3d9_device.cpp b/src/d3d9/d3d9_device.cpp
-index 5679c1a..21d6ed6 100644
+index 5679c1a..b208612 100644
 --- a/src/d3d9/d3d9_device.cpp
 +++ b/src/d3d9/d3d9_device.cpp
 @@ -33,6 +33,8 @@
@@ -30,6 +30,21 @@ index 5679c1a..21d6ed6 100644
  
      // SM2 level hardware
      enabled.core.features.occlusionQueryPrecise = VK_TRUE;
+@@ -6327,6 +6332,14 @@ namespace dxvk {
+ 
+     pResource->ClearDirtyBoxes();
+     pResource->ClearNeedsUpload();
++
++    // Same conditions as tossing the staging buffer of a default pool texture on unlock.
++    if (m_d3d9Options.freeManagedCopies
++     && pResource->GetMapMode() == D3D9_COMMON_TEXTURE_MAP_MODE_BACKED
++     && !pResource->IsDynamic()
++     && !pResource->IsAnySubresourceLocked()
++     && pResource->GetFormatMapping().ConversionFormatInfo.FormatType == D3D9ConversionFormat_None)
++      pResource->DestroyBuffer();
+   }
+ 
+ 
 diff --git a/src/d3d9/d3d9_device.h b/src/d3d9/d3d9_device.h
 index c307036..3fbfe44 100644
 --- a/src/d3d9/d3d9_device.h
@@ -136,6 +151,37 @@ index f91857b..64c0316 100644
 +    D3D9DeviceMutex m_mutex;
  
    };
+ 
+diff --git a/src/d3d9/d3d9_options.cpp b/src/d3d9/d3d9_options.cpp
+index e535d61..4c2d31e 100644
+--- a/src/d3d9/d3d9_options.cpp
++++ b/src/d3d9/d3d9_options.cpp
+@@ -71,6 +71,11 @@ namespace dxvk {
+     this->allowDirectBufferMapping      = config.getOption<bool>        ("d3d9.allowDirectBufferMapping",      true);
+     this->seamlessCubes                 = config.getOption<bool>        ("d3d9.seamlessCubes",                 false);
+     this->textureMemory                 = config.getOption<int32_t>     ("d3d9.textureMemory",                 100) << 20;
++#ifdef __ANDROID__
++    this->freeManagedCopies             = config.getOption<bool>        ("d3d9.freeManagedCopies",             true);
++#else
++    this->freeManagedCopies             = config.getOption<bool>        ("d3d9.freeManagedCopies",             false);
++#endif
+     this->deviceLossOnFocusLoss         = config.getOption<bool>        ("d3d9.deviceLossOnFocusLoss",         false);
+     this->samplerLodBias                = config.getOption<float>       ("d3d9.samplerLodBias",                0.0f);
+     this->clampNegativeLodBias          = config.getOption<bool>        ("d3d9.clampNegativeLodBias",          false);
+diff --git a/src/d3d9/d3d9_options.h b/src/d3d9/d3d9_options.h
+index 7339f8c..a04b3f3 100644
+--- a/src/d3d9/d3d9_options.h
++++ b/src/d3d9/d3d9_options.h
+@@ -139,6 +139,10 @@ namespace dxvk {
+     /// How much virtual memory will be used for textures (in MB).
+     int32_t textureMemory;
+ 
++    /// Drop the system memory copy of a managed texture once it is on the GPU (a later lock reads it back).
++    /// On phones GPU memory is system memory, so the copy doubles the RAM every managed texture takes.
++    bool freeManagedCopies;
++
+     /// Shader dump path
+     std::string shaderDumpPath;
  
 diff --git a/src/d3d9/d3d9_swapchain.cpp b/src/d3d9/d3d9_swapchain.cpp
 index 391cec8..e44413c 100644
