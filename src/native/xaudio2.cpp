@@ -88,12 +88,13 @@ void EnsureGuestThread() {
 
 uint32_t Method(uint32_t obj, int index) { return R32(R32(obj) + 4 * uint32_t(index)); }
 
-// Diagnostics (setting audio_stats): per 5 s, the mixing passes, the longest gap between passes, the time spent
+// Diagnostics (setting audio_stats; by default only when something starved): per 5 s, the mixing passes, the longest gap between passes, the time spent
 // in guest callbacks (on FAudio's mixing thread, so it delays the device), and the passes where the engine's
 // source voice was short of data (BytesRequired > 0: audible as a dropout).
 struct AudioStats {
     using Clock = std::chrono::steady_clock;
-    bool on = SettingInt("audio_stats", 0) != 0;
+    int level = SettingInt("audio_stats", 1);  // 1: only windows where the engine's voice starved, 2: all, 0: off
+    bool on = level != 0;
     Clock::time_point window = Clock::now(), last_pass{};
     uint32_t passes = 0, starved = 0, submits = 0;
     double max_gap_ms = 0, guest_ms = 0, max_guest_ms = 0;
@@ -122,8 +123,9 @@ void StatsPass() {
     }
     s.last_pass = now;
     if (now - s.window >= std::chrono::seconds(5)) {
-        Log("audio: %u passes, max gap %.1f ms, guest %.1f ms (max %.2f), starved %u, submits %u", s.passes,
-            s.max_gap_ms, s.guest_ms, s.max_guest_ms, s.starved, s.submits);
+        if (s.level >= 2 || s.starved)
+            Log("audio: %u passes, max gap %.1f ms, guest %.1f ms (max %.2f), starved %u, submits %u", s.passes,
+                s.max_gap_ms, s.guest_ms, s.max_guest_ms, s.starved, s.submits);
         s.window = now;
         s.passes = s.starved = s.submits = 0;
         s.max_gap_ms = s.guest_ms = s.max_guest_ms = 0;
