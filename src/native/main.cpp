@@ -273,8 +273,10 @@ int main(int argc, char** argv) {
         fprintf(stderr, "usage: %s <game directory>\n", argv[0]);
         return 2;
     }
+    rename("proto-native.log", "proto-native.prev.log");  // the previous run's log survives one restart
     g_log = fopen("proto-native.log", "w");
     InstallCrashHandler();
+    Log("proto-re build %s %s", __DATE__, __TIME__);
     InitGuestMemory();
     AttachThread(8u << 20);
     InitD3D9Bridge();

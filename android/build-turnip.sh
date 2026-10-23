@@ -50,14 +50,17 @@ endian = 'little'
 EOF
 
 # Turnip only: no OpenGL, no LLVM, KGSL (the Adreno kernel driver Android ships) and Android's window system.
-# android-stub links against stub copies of the platform's private libraries instead of an AOSP tree.
+# android-stub links against stub copies of the platform's private libraries instead of an AOSP tree. libc++ is linked
+# statically: the APK ships no libc++_shared.so, and without it the driver fails to load (adrenotools then silently
+# hands out the system driver).
 rm -rf "$SRC/build/mesa"
 meson setup "$SRC/build/mesa" "$SRC/mesa" --cross-file "$CROSS" --buildtype release --prefix "$PREFIX" \
       -Dplatforms=android -Dplatform-sdk-version=$API -Dandroid-stub=true -Dandroid-libbacktrace=disabled \
       -Dgallium-drivers= -Dvulkan-drivers=freedreno -Dfreedreno-kmds=kgsl \
       -Dopengl=false -Dgles1=disabled -Dgles2=disabled -Degl=disabled -Dglx=disabled -Dgbm=disabled \
       -Dllvm=disabled -Dzstd=disabled -Dexpat=disabled -Dvalgrind=disabled -Dlibunwind=disabled \
-      -Dvulkan-layers= -Dtools= -Dbuild-tests=false -Db_ndebug=true
+      -Dvulkan-layers= -Dtools= -Dbuild-tests=false -Db_ndebug=true \
+      -Dc_link_args=-static-libstdc++ -Dcpp_link_args=-static-libstdc++
 ninja -C "$SRC/build/mesa" -j "$JOBS" src/freedreno/vulkan/libvulkan_freedreno.so
 cp "$SRC/build/mesa/src/freedreno/vulkan/libvulkan_freedreno.so" "$PREFIX/lib/"
 
