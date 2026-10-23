@@ -131,9 +131,11 @@ void SelectVulkanDriver() {
         LogSystemDevice();
         return;
     }
-    void* lib = adrenotools_open_libvulkan(RTLD_NOW, ADRENOTOOLS_DRIVER_CUSTOM, nullptr, libdir, libdir,
+    // adrenotools joins the directory and the file name as is, so the directories need the trailing slash.
+    const std::string dir = std::string(libdir) + "/";
+    void* lib = adrenotools_open_libvulkan(RTLD_NOW, ADRENOTOOLS_DRIVER_CUSTOM, nullptr, dir.c_str(), dir.c_str(),
                                            "libvulkan_freedreno.so", nullptr, nullptr);
-    if (!lib) Log("vulkan: adrenotools could not load Turnip: %s", dlerror());
+    if (!lib) Log("vulkan: adrenotools could not load Turnip (%s)", dlerror() ? dlerror() : "no dlerror");
     auto gipa = lib ? DriverGipa(lib) : nullptr;
     const std::string device = gipa ? ProbeDevice(gipa, "Turnip") : "";
     if (device.empty()) {
