@@ -1,164 +1,157 @@
 # proto-re
 
-Нативный порт **Prototype (2009, Radical Entertainment)** на Android через реверс-инжиниринг движка.
+[Русский](README.ru.md) | English
 
-Не эмуляция: код движка (`prototypeenginef.dll`) переводится в C статическим перекомпилятором
-x86 → C и вручную реконструируется по подсистемам. Затем он собирается под arm64 с собственным
-платформенным слоем. В APK лежит только наш код, файлы игры пользователь копирует из своей копии.
+Native Android port of Prototype (2009). Not an emulator and not Wine: `prototypeenginef.dll` is statically
+recompiled from x86 to C, built for arm64 and run on top of my own Win32/D3D9 layer (SDL2, DXVK, FAudio).
+The APK has no game data in it, you copy the files from your own copy of the game.
 
-Текущее состояние и план: [ROADMAP.md](ROADMAP.md).
+Roadmap (Russian): [ROADMAP.md](ROADMAP.md). Engine notes: [re/subsystems.md](re/subsystems.md).
 
-## Условия
+## Status
 
-- Только легально купленная копия игры (PC, Steam app 10150, сборка **19788432**).
-- Ассеты игры (`.rcf`, `.p3d`, `.bik`, …), исходный DLL, декомпилированный код и сгенерированный
-  перекомпилятором C в репозиторий **не попадают** (`.gitignore`: `build/`, `re/decomp/`, `ghidra/`).
-- DRM не обходим: папку `Crack/` из раздач не используем.
-- Порт для личного использования, ассеты игры не распространяем.
+Runs on the phone: menus, videos, sound, missions, saves. A full playthrough is not tested yet. Russian text works (fan translation).
 
-## Как это устроено
+- touch controls with a layout editor, camera sensitivity, invert Y, vibration
+- gamepad
+- Mali uses the system Vulkan driver, Adreno uses Turnip (Mesa) through libadrenotools
+- settings in game: render resolution, textures, FPS limit, battery saver
+- ADPF hints so the phone doesn't run the CPU at max all the time
 
-```
-prototypef.exe ──LoadLibrary──▶ prototypeenginef.dll ──импорт──▶ binkw32.dll  (наш прокси)
-                                     ▲                               │
-                                     │  jmp-хуки на входах функций   │
-                                     └───────────────────────────────┘
-          ├─ ручные реконструкции (src/core, src/math), проверенные дифтестами
-          └─ перекомпилированный движок (build/recomp/*, мост src/recomp/bridge_x86.cpp)
-```
+Pixel 6 (Mali-G78): menus 60 fps, gameplay 38-46 at 720p and 33-42 at 1080p. Gameplay is CPU bound right now.
 
-1. **Хост-прокси.** `src/host` собирается как `binkw32.dll` и пересылает настоящие вызовы Bink в
-   `binkw32_orig.dll`. Прокси загружается раньше `EngineInitialize`, сверяет сборку движка
-   (TimeDateStamp `0x689E2026`) и ставит хуки.
-2. **Ручная реконструкция (по методике re3/reVC).** Функция переписывается на C++ и ставится
-   хуком поверх оригинала. Затем она проверяется дифференциальным тестом прямо внутри процесса:
-   на одних и тех же входах вызываются оригинал и реконструкция, результаты сравниваются.
-3. **Статический перекомпилятор.** `tools/recomp/recomp.py` (capstone) переводит каждую функцию
-   движка в `void f_<va>(Ctx*)` с явным состоянием процессора:
-   - точные флаги с анализом живости;
-   - модели x87 и SSE;
-   - таблицы переходов, setjmp/longjmp, атомарные операции.
+## TODO
 
-   Весь движок: 73 595 функций, неподдерживаемых инструкций 0. Мост переключает стеки между
-   нативным и перекомпилированным кодом, у каждого файбера свой стек.
+- 60 fps at 1080p. Mostly CPU work: rewrite the hot functions of the main/render threads by hand, cut down
+  D3D9 buffer locking, try LTO/PGO. Later maybe 30 Hz sim with interpolated 60 Hz rendering and FSR/ASR upscaling.
+- auto quality presets on first launch, built-in benchmark
+- ASTC/ETC2 textures, less heat and battery drain
+- controls: context buttons in fights (grab/throw, consume, shield), swipe wheel for powers and disguises,
+  target lock on the nearest enemy, separate layouts for helicopter/tank, stick dead zone
+- test on real Adreno phones and weaker Mali (G57/G68)
+- GLES 3.0 fallback for phones with bad Vulkan drivers
+- first launch screen to pick the game folder and check files
+- language switch in settings, audio overlay support in case a Russian dub ever shows up
+- save backups
 
-## Структура
+## Installing
 
-| Путь | Что там |
+Android 10+, arm64, and a bought copy of the game (PC, Steam app 10150, build 19788432).
+
+1. Install `prototype.apk` and start it once so it creates its folder.
+2. Copy `prototypeenginef.dll`, all `.rcf` and `.p3d` files and the `art`, `audio`, `scripts` folders to
+   `/sdcard/Android/data/com.protore.game/files/game/`. For Russian, use the `.rcf` files with the translation applied.
+3. Optionally put `protore.ini` in `/sdcard/Android/data/com.protore.game/files/`
+   (see [android/protore.ini.example](android/protore.ini.example)). It has to be readable, `chmod 666`.
+
+Logs go to the same folder (`proto-native.log`, `app_process64_d3d9.log`) and to `adb logcat -s protore`.
+
+`protore.ini` keys:
+
+| key | |
 |---|---|
-| `src/host/` | прокси `binkw32.dll`: установка хуков, реестр хуков, дифтесты, пробы, `memwatch`, `WorldStop` |
-| `src/core/`, `src/math/` | реконструированный код движка (Report, хеш имён, Cement/RCF, память, файлы, запросы) |
-| `src/tests/` | дифференциальные тесты реконструкций |
-| `src/recomp/` | рантайм перекомпилированного кода (`runtime.h`, `runtime_fp.h`) и мост x86 |
-| `tools/rcf.py`, `p3d.py`, `rcfdiff.py` | чтение архивов RCF 2.1, дерева чанков Pure3D, сравнение архивов |
-| `tools/recomp/` | перекомпилятор и `bisect.sh` (поиск функции, ломающей игру) |
-| `tools/hookgen.py`, `disfn.sh` | заготовки хуков и дизассемблирование функций по адресу |
-| `tools/ghidra/` | скрипты экспорта функций и декомпиляции для `analyzeHeadless` |
-| `re/subsystems.md` | все находки: архитектура, форматы, подсистемы |
-| `re/issues.md` | открытые и закрытые проблемы |
-| `re/functions.csv` | инвентарь функций из Ghidra (адрес, размер, thunk, имя) |
-| `android/` | будущий Gradle/NDK-проект |
+| `render_height` | 720, 900, 1080, 0 = screen |
+| `texture_skip_mips` | 0 original, 1 half, 2 quarter |
+| `fps_limit` | 30 / 45 / 60 |
+| `battery_saver` | 30 fps, no big core pinning |
+| `perf_hint` | ADPF on/off |
+| `vulkan_driver` | `auto` / `system` / `turnip` |
+| `present_stats` | DXVK stats in the log |
+| `import_profile`, `watchdog` | profiling, hang diagnostics |
 
-## Требования (Linux)
+Every key also works as an env var `PROTORE_<KEY>`.
 
-- `mingw-w64-gcc` (i686): сборка прокси;
-- `wine` + `dxvk`: запуск оригинала;
-- `python3` с `capstone` и `pefile`: перекомпилятор и инструменты;
-- `llvm-objdump`: `disfn.sh`;
-- `xdelta3`, `innoextract`: разбор русского патча;
-- Ghidra (headless): анализ движка.
+## How it works
 
-## Подготовка
+`tools/recomp/recomp.py` (capstone) turns each engine function into `void f_<va>(Ctx*)` with explicit CPU
+state: flags with liveness analysis, x87 and SSE, jump tables, setjmp/longjmp, atomics. All 73,595
+functions go through, no unsupported instructions.
 
-```sh
-# Тестовая папка игры: символические ссылки на оригинальную установку
-mkdir -p ~/proto-re-data/game && cd ~/proto-re-data/game
-ln -s "$HOME/Downloads/Prototype (2009)/Prototype/"* .
-rm binkw32.dll
-cp "$HOME/Downloads/Prototype (2009)/Prototype/binkw32.dll" binkw32_orig.dll
+`src/native` is the runtime: PE loader, the Windows imports the engine uses, D3D9 forwarded to DXVK,
+XAudio2 to FAudio, input through SDL2. A few hot paths (skinning, audio) are written by hand.
 
-# Wine-префикс с DXVK
-export WINEPREFIX=~/proto-re-data/wineprefix
-wineboot -i && setup_dxvk install
-```
+Some functions are also reconstructed by hand in C++ (re3/reVC style) and checked against the original with
+in-process diff tests under Wine (`src/host`, a `binkw32.dll` proxy). About 230 so far, no mismatches.
 
-Путь к оригинальному DLL для инструментов задаётся через `PROTORE_ENGINE`
-(по умолчанию `~/Downloads/Prototype (2009)/Prototype/prototypeenginef.dll`).
+| path | |
+|---|---|
+| `src/native/` | runtime: loader, Win32, D3D9 bridge, audio, input, ADPF, Turnip |
+| `src/recomp/` | headers for the recompiled code, x86 bridge |
+| `src/host/` | Wine proxy: hooks, diff tests, probes |
+| `src/core/`, `src/math/` | hand-reconstructed engine code |
+| `src/tests/` | diff tests |
+| `android/` | Java (activity, touch controls), build scripts, DXVK patches |
+| `tools/recomp/` | recompiler, `bisect.sh` |
+| `tools/` | RCF/P3D tools, D3D9 bridge generator, misc |
+| `tools/ghidra/` | headless Ghidra scripts |
+| `re/` | notes, issues, function list |
 
-## Сборка и запуск
+## Building
 
-### Нативная версия (без Wine)
+Linux. Needs the Android NDK, JDK, SDK build-tools, python3 with `capstone` and `pefile`, cmake, ninja,
+meson >= 1.4. Turnip also needs mako, pyyaml, bison, flex, glslangValidator. For the Wine side:
+`mingw-w64-gcc` (i686), wine, dxvk. `PROTORE_ENGINE` points to the original DLL
+(default `~/Downloads/Prototype (2009)/Prototype/prototypeenginef.dll`).
 
-Зависимости в `~/proto-re-data/deps`: DXVK 2.5.3 (собран с `-Denable_d3d9=true -Ddxvk_native_wsi=sdl2` в
-`build-native`), FAudio 25.10 (`build-native`); SDL2 из системы.
-
-```sh
-python3 -I tools/recomp/data_entries.py                                                 # точки входа вне Ghidra
-python3 -I tools/recomp/recomp.py --functions all --out build/recomp/all --split 400     # ~3 мин
-make -C src/native -j4                                   # первый раз ~11 мин, потом секунды
-cd ~/proto-re-data/native_run && PROTORE_WINDOWED=1 ~/proto-re/build/native/proto-native ~/proto-re-data/game
-```
-
-Лог пишется в `proto-native.log` в текущей папке.
-
-### Android
+APK:
 
 ```sh
 android/build-deps.sh arm64-v8a ~/proto-re-data/android-deps-src ~/proto-re-data/android-deps/arm64-v8a
-make -C src/native -j4 PLATFORM=android ABI=arm64-v8a     # build/android/arm64-v8a/libmain.so
-android/build-apk.sh arm64-v8a                           # build/apk/prototype.apk
+android/build-turnip.sh ~/proto-re-data/android-deps-src ~/proto-re-data/android-turnip
+python3 -I tools/recomp/data_entries.py
+python3 -I tools/recomp/recomp.py --functions all --out build/recomp/all --split 400
+tools/cool_make.sh -C src/native PLATFORM=android ABI=arm64-v8a
+android/build-apk.sh arm64-v8a
 adb install -r build/apk/prototype.apk
 ```
 
-Файлы игры (`prototypeenginef.dll`, все `.rcf`, `.p3d`, папки `art`, `audio`, `scripts`) копируются в
-`/sdcard/Android/data/com.protore.game/files/game/`. Лог: `adb logcat -s protore`.
-Зависимости (SDL2, FAudio, DXVK) также собираются на GitHub Actions (`android-deps`, артефакты на 30 дней);
-код игры и сгенерированный из неё код на GitHub не попадают.
+The deps (SDL2, FAudio, DXVK, Turnip) are also built by GitHub Actions. `cool_make.sh` is make with
+2 jobs that pauses when the CPU gets too hot, my laptop shut down once without it.
 
-### Через Wine (прокси с хуками)
+Desktop build (DXVK 2.5.3 with `-Denable_d3d9=true -Ddxvk_native_wsi=sdl2` and FAudio in `~/proto-re-data/deps`):
 
-Прокси с ручными хуками и прототипным набором перекомпилированных функций:
+```sh
+tools/cool_make.sh -C src/native
+cd ~/proto-re-data/native_run && PROTORE_WINDOWED=1 ~/proto-re/build/native/proto-native ~/proto-re-data/game
+```
+
+Wine proxy (game folder = symlinks to the install, original `binkw32.dll` renamed to `binkw32_orig.dll`):
 
 ```sh
 make -C src/host -j4
 cp build/host/binkw32.dll ~/proto-re-data/game/
-cd ~/proto-re-data/game && wine prototypef.exe     # лог: proto-re.log
+cd ~/proto-re-data/game && wine prototypef.exe
 ```
 
-Весь движок через перекомпилятор (генерация ~8 мин, сборка ~15 мин, DLL ~65 МБ):
+<details>
+<summary>debug env vars</summary>
 
-```sh
-python3 -I tools/recomp/recomp.py --functions all --out build/recomp/all --split 400
-make -C src/host -j4 OUT=../../build/host_all RECOMP_DIR=../../build/recomp/all
-cp build/host_all/binkw32.dll ~/proto-re-data/game/
-PROTORE_RECOMP=all wine prototypef.exe
-```
-
-## Переключатели (переменные окружения)
-
-| Переменная | Действие |
+| var | |
 |---|---|
-| `PROTORE_NOHOOKS=1` | оригинальный движок через тот же прокси (A/B-сравнение) |
-| `PROTORE_NULLPATCH=1` | записать на место хуков исходные байты (проверка самой установки) |
-| `PROTORE_ONLY=a,b` / `PROTORE_SKIP=a,b` | включить или исключить хуки по префиксам имён |
-| `PROTORE_DIFFTEST=1` / `=exit` | прогнать дифтесты в процессе (и выйти) |
-| `PROTORE_DIFFTEST_RECOMP=1` | дифтесты «перекомпилированное против оригинала» |
-| `PROTORE_RECOMP=1` / `=all` | прототипный набор / весь движок через перекомпилятор |
-| `PROTORE_RECOMP_RANGE=lo-hi` | перекомпилированы только функции в диапазоне адресов (hex, hi не включается) |
-| `PROTORE_PROBE=openbykey\|watchdir` | диагностические пробы файловой системы |
-| `PROTORE_TRACE_FPU=1` | трассировка вызовов CRT, зависящих от состояния FPU |
-| `PROTORE_WINDOWED=1` | нативная версия: окно вместо полного экрана |
-| `PROTORE_SHOT=300,2000` | нативная версия: сохранить кадры с этими номерами в `shot_<кадр>.ppm` |
-| `PROTORE_INPUT=2100:Return,...` | нативная версия: нажать клавишу (имя SDL) на заданном кадре |
-| `PROTORE_TRACE_FILES=1` | нативная версия: писать в лог каждое открытие файла |
+| `PROTORE_NOHOOKS=1` | original engine through the proxy |
+| `PROTORE_NULLPATCH=1` | write the original bytes back over the hooks |
+| `PROTORE_ONLY=a,b` / `PROTORE_SKIP=a,b` | filter hooks by name prefix |
+| `PROTORE_DIFFTEST=1` / `=exit` | run diff tests (and exit) |
+| `PROTORE_DIFFTEST_RECOMP=1` | recompiled vs original diff tests |
+| `PROTORE_RECOMP=1` / `=all` | test set / whole engine recompiled |
+| `PROTORE_RECOMP_RANGE=lo-hi` | recompile only this address range |
+| `PROTORE_PROBE=openbykey\|watchdir` | file system probes |
+| `PROTORE_TRACE_FPU=1` | trace FPU dependent CRT calls |
+| `PROTORE_WINDOWED=1` | desktop: windowed |
+| `PROTORE_SHOT=300,2000` | dump these frames to `shot_<n>.ppm` |
+| `PROTORE_INPUT=2100:Return,...` | press a key at a frame |
+| `PROTORE_TRACE_FILES=1` | log file opens |
 
-Поиск функции, ломающей игру:
-`MIN_FRAMES=64 RUN_SECONDS=70 [START_LO=N] tools/recomp/bisect.sh`.
-Шаг засчитывается, только если движок прошёл не меньше `MIN_FRAMES` кадров главного цикла. Во время поиска окно
-игры само открывается и закрывается, в части запусков чёрный экран, так и задумано.
+Finding a function that breaks the game: `MIN_FRAMES=64 RUN_SECONDS=70 [START_LO=N] tools/recomp/bisect.sh`
 
-## Русский язык
+</details>
 
-Фанатский текстовый перевод (ElArchibald) — это xdelta-патчи к 8 архивам RCF: субтитры,
-текстовые таблицы, HUD `.gfx` и шрифты (подробности в `re/subsystems.md`). Порт подключит его как
-языковой оверлей поверх оригинальных архивов. Русской озвучки в исходных файлах нет.
+## Notes
+
+Russian is ElArchibald's fan translation, xdelta patches for 8 RCF archives (subtitles, text, HUD, fonts).
+There's no Russian voice-over for the PC version.
+
+Game files, the original DLL, decompiled code and the generated C are not in the repo and never will be.
+No DRM bypass. Bring your own copy of the game, I don't share APKs or game files.
+
+Prototype belongs to Activision / Radical Entertainment.
