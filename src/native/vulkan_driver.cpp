@@ -165,27 +165,34 @@ bool TurnipWorksInChild(const std::string& dir) {
 }
 
 // Crash guard (working directory = the app's files folder): turnip_pending exists while a Turnip run has not yet
-// reached VulkanDriverConfirm. If it is still there at the next start, that run crashed or hung during startup:
-// turnip_failed is written and auto mode stays on the system driver; vulkan_driver = turnip still forces Turnip.
+// reached VulkanDriverConfirm. If it is still there at the next start, that run crashed or hung during startup (its
+// log is proto-native.prev.log): turnip_failed is written and auto mode stays on the system driver for this build;
+// vulkan_driver = turnip still forces Turnip. A failed test in the child process is not recorded: it costs a second
+// and is retried (and logged) at every start.
 constexpr const char* kPending = "turnip_pending";
 constexpr const char* kFailed = "turnip_failed";
 constexpr const char* kBuild = __DATE__ " " __TIME__;  // a failure recorded by another build is retried
 bool g_turnip_pending = false;
 
-void MarkFailed() {
+void MarkFailed(const char* reason) {
     if (FILE* f = fopen(kFailed, "w")) {
-        fputs(kBuild, f);
+        fprintf(f, "%s\n%s\n", kBuild, reason);
         fclose(f);
     }
 }
 
-bool FailedBefore() {
+// The recorded reason if Turnip failed with this build, "" otherwise.
+std::string FailedBefore() {
     FILE* f = fopen(kFailed, "r");
-    if (!f) return false;
-    char buf[64] = {};
-    fgets(buf, sizeof(buf), f);
+    if (!f) return "";
+    char build[64] = {}, reason[256] = {};
+    fgets(build, sizeof(build), f);
+    fgets(reason, sizeof(reason), f);
     fclose(f);
-    return strcmp(buf, kBuild) == 0;
+    build[strcspn(build, "\n")] = 0;
+    reason[strcspn(reason, "\n")] = 0;
+    if (strcmp(build, kBuild) != 0) return "";
+    return reason[0] ? reason : "unknown";
 }
 
 }  // namespace
@@ -206,14 +213,14 @@ void SelectVulkanDriver() {
     }
     if (access(kPending, F_OK) == 0) {
         unlink(kPending);
-        MarkFailed();
+        MarkFailed("the game crashed or hung during startup on Turnip (see proto-native.prev.log)");
         Log("vulkan: the last Turnip run ended during startup");
     }
     if (mode == "turnip") {
         unlink(kFailed);
-    } else if (FailedBefore()) {
-        Log("vulkan: Turnip failed here before (%s), using the system driver; vulkan_driver = turnip forces it",
-            kFailed);
+    } else if (std::string why = FailedBefore(); !why.empty()) {
+        Log("vulkan: Turnip failed here before: %s; using the system driver (vulkan_driver = turnip forces Turnip)",
+            why.c_str());
         LogSystemDevice();
         return;
     }
@@ -225,7 +232,6 @@ void SelectVulkanDriver() {
     }
     const std::string dir = std::string(libdir) + "/";
     if (!TurnipWorksInChild(dir)) {
-        if (mode == "auto") MarkFailed();
         Log("vulkan: Turnip not usable, using the system driver");
         LogSystemDevice();
         return;

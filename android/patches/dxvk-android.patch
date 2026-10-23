@@ -586,6 +586,30 @@ index 1285c4e..151caa9 100644
      
      Rc<vk::DeviceFn> vkd = new vk::DeviceFn(m_vki, true, device);
  
+diff --git a/src/dxvk/dxvk_buffer.cpp b/src/dxvk/dxvk_buffer.cpp
+index 364d7a5..fa9185b 100644
+--- a/src/dxvk/dxvk_buffer.cpp
++++ b/src/dxvk/dxvk_buffer.cpp
+@@ -27,8 +27,17 @@ namespace dxvk {
+       m_info.debugName = nullptr;
+     }
+ 
+-    // Create and assign actual buffer resource
+-    assignStorage(allocateStorage());
++    // Create and assign actual buffer resource. A failed allocation throws (D3D9 turns that into an error code)
++    // instead of dereferencing a null storage; the allocator must not keep a pointer to the half-built buffer.
++    Rc<DxvkResourceAllocation> storage = allocateStorage();
++
++    if (unlikely(!storage)) {
++      m_allocator->unregisterResource(this);
++      throw DxvkError(str::format("DxvkBuffer: Failed to create buffer, size ", createInfo.size,
++        ", usage ", std::hex, createInfo.usage, ", memory flags ", memFlags));
++    }
++
++    assignStorage(std::move(storage));
+   }
+ 
+ 
 diff --git a/src/dxvk/dxvk_presenter.cpp b/src/dxvk/dxvk_presenter.cpp
 index 27d6bb1..922f178 100644
 --- a/src/dxvk/dxvk_presenter.cpp
@@ -641,6 +665,25 @@ index 27d6bb1..922f178 100644
 +    g_preAcqUs += nowUs() - t1;
  
      return status;
+   }
+diff --git a/src/util/log/log.cpp b/src/util/log/log.cpp
+index 2fca3ec..76f7f7f 100644
+--- a/src/util/log/log.cpp
++++ b/src/util/log/log.cpp
+@@ -109,8 +109,13 @@ namespace dxvk {
+ #endif
+         }
+ 
+-        if (m_fileStream)
++        if (m_fileStream) {
+           m_fileStream << adjusted;
++#ifdef __ANDROID__
++          // Android: the process often dies from a crash (or is killed) right after the interesting message.
++          m_fileStream.flush();
++#endif
++        }
+       }
+     }
    }
 diff --git a/src/vulkan/vulkan_loader.cpp b/src/vulkan/vulkan_loader.cpp
 index 17e9b62..198b7b3 100644
