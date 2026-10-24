@@ -105,6 +105,8 @@ android/build-turnip.sh ~/proto-re-data/android-deps-src ~/proto-re-data/android
 python3 -I tools/recomp/data_entries.py
 python3 -I tools/recomp/recomp.py --functions all --out build/recomp/all --split 400
 tools/cool_make.sh -C src/native PLATFORM=android ABI=arm64-v8a
+# по желанию, для телефонов на ARMv8.0 (Cortex-A53/A73, Snapdragon 6xx и старше); APK сам выбирает нужную при запуске
+tools/cool_make.sh -C src/native PLATFORM=android ABI=arm64-v8a ARM_ARCH=armv8-a OUT=../../build/android/arm64-v8a-v80
 android/build-apk.sh arm64-v8a
 adb install -r build/apk/prototype.apk
 ```

@@ -36,6 +36,11 @@ cp "$OUT/dex/classes.dex" "$OUT/pkg/"
 for abi in "${ABIS[@]}"; do
     mkdir -p "$OUT/pkg/lib/$abi"
     cp "$ROOT/build/android/$abi/libmain.so" "$DEPS_ROOT/$abi"/lib/lib{SDL2,FAudio,dxvk_d3d9}.so "$OUT/pkg/lib/$abi/"
+    # arm64: libmain.so targets ARMv8.2 + RCpc; the ARMv8.0 build for older cores (make ... ARM_ARCH=armv8-a
+    # OUT=../../build/android/arm64-v8a-v80) ships next to it, ProtoActivity picks one at run time.
+    if [ -e "$ROOT/build/android/$abi-v80/libmain.so" ]; then
+        cp "$ROOT/build/android/$abi-v80/libmain.so" "$OUT/pkg/lib/$abi/libmain_v80.so"
+    fi
     # Adreno: Turnip and the adrenotools hooks (android/build-turnip.sh), when built
     if [ "$abi" = arm64-v8a ] && [ -e "$TURNIP_ROOT/lib/libvulkan_freedreno.so" ]; then
         cp "$TURNIP_ROOT"/lib/*.so "$OUT/pkg/lib/$abi/"

@@ -7,6 +7,12 @@ import android.system.Os;
 import android.view.ViewGroup;
 import android.view.WindowManager;
 
+import java.io.BufferedReader;
+import java.io.FileReader;
+import java.io.IOException;
+import java.util.Arrays;
+import java.util.List;
+
 import org.libsdl.app.SDLActivity;
 import org.libsdl.app.SDLSurface;
 
@@ -14,7 +20,27 @@ import org.libsdl.app.SDLSurface;
 public class ProtoActivity extends SDLActivity {
     @Override
     protected String[] getLibraries() {
-        return new String[] {"SDL2", "FAudio", "dxvk_d3d9", "main"};
+        return new String[] {"SDL2", "FAudio", "dxvk_d3d9", modernCpu() ? "main" : "main_v80"};
+    }
+
+    /**
+     * libmain.so is built for ARMv8.2 with RCpc (LDAPR keeps the emulated x86 memory ordering cheap) and LSE atomics;
+     * older cores (Cortex-A53/A73, e.g. Snapdragon 6xx) get libmain_v80.so, built for ARMv8.0. Every core must have
+     * both features: big.LITTLE phones list each core's features separately.
+     */
+    private static boolean modernCpu() {
+        int cores = 0;
+        try (BufferedReader r = new BufferedReader(new FileReader("/proc/cpuinfo"))) {
+            for (String line; (line = r.readLine()) != null;) {
+                if (!line.startsWith("Features")) continue;
+                List<String> features = Arrays.asList(line.substring(line.indexOf(':') + 1).trim().split("\\s+"));
+                if (!features.contains("atomics") || !features.contains("lrcpc")) return false;
+                ++cores;
+            }
+        } catch (IOException e) {
+            return false;
+        }
+        return cores > 0;
     }
 
     @Override
