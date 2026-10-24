@@ -34,6 +34,7 @@
 namespace native {
 
 const char* g_game_dir = nullptr;
+const char* g_data_dir = nullptr;  // Android: the app's external files folder (logs, ini, saves)
 
 namespace {
 std::mutex g_log_mutex;
@@ -244,29 +245,27 @@ int main(int argc, char** argv) {
 #endif
     g_game_dir = argc > 1 ? argv[1] : getenv("PROTORE_GAME");
 #ifdef __ANDROID__
-    // The user copies the game into <app external files>/game (/sdcard/Android/data/<package>/files/game); logs,
-    // saves (native_c) and the DXVK caches go next to it.
+    // Logs, protore.ini, saves (native_c) and the DXVK caches live in the app's external files folder
+    // (/sdcard/Android/data/<package>/files). The game is <that folder>/game, or wherever SetupActivity found it
+    // (PROTORE_GAME, e.g. /sdcard/Prototype with all files access); SetupActivity checks it before starting us.
     static std::string android_game;
+    const char* base = SDL_AndroidGetExternalStoragePath();
+    if (!base) {
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Prototype", SDL_GetError(), nullptr);
+        return 1;
+    }
+    if (chdir(base) != 0) return 1;
+    g_data_dir = base;
+    setenv("DXVK_STATE_CACHE_PATH", base, 0);
+    setenv("DXVK_LOG_PATH", base, 0);
     if (!g_game_dir) {
-        const char* base = SDL_AndroidGetExternalStoragePath();
-        Log("external storage: %s", base ? base : SDL_GetError());
-        if (!base) {
-            SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Prototype", SDL_GetError(), nullptr);
-            return 1;
-        }
         android_game = std::string(base) + "/game";
         g_game_dir = android_game.c_str();
-        if (chdir(base) != 0) return 1;
-        setenv("DXVK_STATE_CACHE_PATH", base, 0);
-        setenv("DXVK_LOG_PATH", base, 0);
-        std::string dll = android_game + "/prototypeenginef.dll";
-        if (access(dll.c_str(), R_OK) != 0) {
-            Log("cannot read %s: %s", dll.c_str(), strerror(errno));
-            std::string msg = "Copy the game files (prototypeenginef.dll, *.rcf, ...) to\n" + android_game + "\n(" +
-                              strerror(errno) + ")";
-            SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Prototype", msg.c_str(), nullptr);
-            return 1;
-        }
+    }
+    if (std::string dll = std::string(g_game_dir) + "/prototypeenginef.dll"; access(dll.c_str(), R_OK) != 0) {
+        std::string msg = "Cannot read " + dll + " (" + strerror(errno) + ").\nCopy the game files there.";
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Prototype", msg.c_str(), nullptr);
+        return 1;
     }
 #endif
     if (!g_game_dir) {

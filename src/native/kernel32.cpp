@@ -78,9 +78,10 @@ std::mutex g_cwd_mutex;
 std::string g_cwd = kGuestGameDir;
 
 std::string HostRootFor(char drive) {
-    // C:\Game is the game directory; everything else on C: lives under <game>/../native_c (saves, settings).
+    // C:\Game is the game directory; everything else on C: lives under native_c (saves, settings): in the app's
+    // data folder on Android (the game folder may be shared storage), next to the game folder elsewhere.
     (void)drive;
-    return std::string(g_game_dir) + "/../native_c";
+    return g_data_dir ? std::string(g_data_dir) + "/native_c" : std::string(g_game_dir) + "/../native_c";
 }
 
 // Finds `name` in `dir` ignoring case; returns the real name or `name` itself when nothing matches.

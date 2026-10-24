@@ -39,9 +39,11 @@ A phone with Adreno 735: about 40 fps on average at 720p.
 
 Android 10+, arm64, and a bought copy of the game (PC, Steam app 10150, build 19788432).
 
-1. Install `prototype.apk` and start it once so it creates its folder.
-2. Copy `prototypeenginef.dll`, all `.rcf` and `.p3d` files and the `art`, `audio`, `scripts` folders to
-   `/sdcard/Android/data/com.protore.game/files/game/`. For Russian, use the `.rcf` files with the translation applied.
+1. Install `prototype.apk` and start it. Without the game files it shows where to put them and creates the folder.
+2. Copy `prototypeenginef.dll`, all `.rcf` and `.p3d` files and the `art`, `audio`, `scripts` folders to either
+   `/sdcard/Android/data/com.protore.game/files/game/` (file managers often can't open it on Android 11+, copy from a
+   PC over USB) or `/sdcard/Prototype/` (any file manager; tap "Allow file access" on the setup screen).
+   For Russian, use the `.rcf` files with the translation applied.
 3. Optionally put `protore.ini` in `/sdcard/Android/data/com.protore.game/files/`
    (see [android/protore.ini.example](android/protore.ini.example)). It has to be readable, `chmod 666`.
 

@@ -40,9 +40,11 @@ Pixel 6 (Mali-G78): в меню 60 fps, в игре 38-46 в 720p и 33-42 в 10
 
 Android 10+, arm64 и купленная игра (PC, Steam app 10150, сборка 19788432).
 
-1. Поставить `prototype.apk` и один раз запустить, чтобы появилась папка.
-2. Скопировать `prototypeenginef.dll`, все `.rcf` и `.p3d` и папки `art`, `audio`, `scripts` в
-   `/sdcard/Android/data/com.protore.game/files/game/`. Для русского нужны `.rcf` с наложенным переводом.
+1. Поставить `prototype.apk` и запустить. Без файлов игры он покажет, куда их класть, и сам создаст папку.
+2. Скопировать `prototypeenginef.dll`, все `.rcf` и `.p3d` и папки `art`, `audio`, `scripts` либо в
+   `/sdcard/Android/data/com.protore.game/files/game/` (на Android 11+ файловые менеджеры туда обычно не пускают,
+   проще скопировать с ПК по USB), либо в `/sdcard/Prototype/` (любой файловый менеджер; на экране запуска нажать
+   "Allow file access"). Для русского нужны `.rcf` с наложенным переводом.
 3. По желанию положить `protore.ini` в `/sdcard/Android/data/com.protore.game/files/`
    (пример: [android/protore.ini.example](android/protore.ini.example)). Нужны права на чтение, `chmod 666`.
 

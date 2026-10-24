@@ -111,6 +111,7 @@ extern uint32_t g_engine_lo, g_engine_hi;
 
 // Directory with the game files (cwd for the engine's relative paths).
 extern const char* g_game_dir;
+extern const char* g_data_dir;  // Android: the app's external files folder; nullptr elsewhere
 
 // ---- settings (config.cpp): protore.ini, overridden by PROTORE_<KEY> environment variables ----
 std::string Setting(const char* key, const char* def);
