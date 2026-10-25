@@ -17,7 +17,7 @@ NDK=${ANDROID_NDK_HOME:-${ANDROID_NDK_LATEST_HOME:?set ANDROID_NDK_HOME}}
 API=29  # adrenotools uses memfd from API 29; older Android is not targeted for Adreno
 JOBS=${JOBS:-$(nproc)}
 
-MESA_TAG=mesa-26.2.4
+MESA_TAG=mesa-26.3.0-rc2  # 26.2 lacks Adreno 710/720 (FD710/FD720) and the A8xx parts
 ADRENOTOOLS_REV=8fae8ce
 
 mkdir -p "$SRC" "$PREFIX/lib" "$PREFIX/include"

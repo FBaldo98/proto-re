@@ -36,7 +36,8 @@ namespace {
 
 // Creates a throwaway instance to see which GPU the driver drives; returns the device name ("" if none) and puts a
 // line for the log in `report` (the probe may run in a forked child, which must not touch the log).
-std::string ProbeDevice(PFN_vkGetInstanceProcAddr gipa, const char* driver, std::string& report) {
+std::string ProbeDevice(PFN_vkGetInstanceProcAddr gipa, const char* driver, std::string& report,
+                        uint32_t* api_version = nullptr) {
     char line[256];
     auto create = reinterpret_cast<PFN_vkCreateInstance>(gipa(nullptr, "vkCreateInstance"));
     if (!create) {
@@ -67,6 +68,7 @@ std::string ProbeDevice(PFN_vkGetInstanceProcAddr gipa, const char* driver, std:
         VkPhysicalDeviceProperties p;
         props(device, &p);
         name = p.deviceName;
+        if (api_version) *api_version = p.apiVersion;
         snprintf(line, sizeof(line), "vulkan: %s sees %s (Vulkan %u.%u.%u, driver %08x, vendor %04x device %08x)",
                  driver, p.deviceName, VK_API_VERSION_MAJOR(p.apiVersion), VK_API_VERSION_MINOR(p.apiVersion),
                  VK_API_VERSION_PATCH(p.apiVersion), p.driverVersion, p.vendorID, p.deviceID);
@@ -78,14 +80,25 @@ std::string ProbeDevice(PFN_vkGetInstanceProcAddr gipa, const char* driver, std:
     return name;
 }
 
-// Logs the system driver's GPU, for reports from phones where Turnip is not used.
+// Logs the system driver's GPU, for reports from phones where Turnip is not used. DXVK needs Vulkan 1.3: an older
+// system driver (Qualcomm's for Adreno 6xx/710 on many phones) cannot run the game, so say that plainly instead of
+// letting DXVK fail later with "no adapters found".
 void LogSystemDevice() {
     void* lib = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
     auto gipa = lib ? reinterpret_cast<PFN_vkGetInstanceProcAddr>(dlsym(lib, "vkGetInstanceProcAddr")) : nullptr;
     if (!gipa) return;
     std::string report;
-    ProbeDevice(gipa, "system driver", report);
+    uint32_t api = 0;
+    std::string device = ProbeDevice(gipa, "system driver", report, &api);
     Log("%s", report.c_str());
+    if (!device.empty() && api < VK_API_VERSION_1_3) {
+        char msg[512];
+        snprintf(msg, sizeof(msg),
+                 "The GPU driver of this phone (%s) supports Vulkan %u.%u, and the game needs Vulkan 1.3. "
+                 "The bundled Turnip driver does not support this GPU (yet).",
+                 device.c_str(), VK_API_VERSION_MAJOR(api), VK_API_VERSION_MINOR(api));
+        StartupFailure(msg);
+    }
 }
 
 // Loads Turnip through adrenotools (in the libvulkan.so loader it returns, Turnip replaces the system driver) and
