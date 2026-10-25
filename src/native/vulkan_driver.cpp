@@ -21,6 +21,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <vector>
 
 // libadrenotools is built for API 29, where libc exports android_get_device_api_level; libmain targets API 26,
 // whose headers only have an inline version, so the Makefile points the symbol here (--defsym).
@@ -104,10 +105,16 @@ void LogSystemDevice() {
 // Loads Turnip through adrenotools (in the libvulkan.so loader it returns, Turnip replaces the system driver) and
 // checks that the device really is Turnip: if Turnip itself fails to load, the adrenotools hook quietly falls back
 // to the system driver, and a second copy of that driver in the process must not be used.
-PFN_vkGetInstanceProcAddr LoadTurnip(const std::string& dir, std::string& device, std::string& report) {
+// A driver to try: adrenotools' hook libraries live in the APK's library folder (hook_dir), the driver in dir.
+struct Driver {
+    std::string hook_dir, dir, file;
+    bool custom;  // the user's own driver: any device name is accepted (it may be a Qualcomm build)
+};
+
+PFN_vkGetInstanceProcAddr LoadTurnip(const Driver& d, std::string& device, std::string& report) {
     // adrenotools joins the directory and the file name as is, so the directories need the trailing slash.
-    void* lib = adrenotools_open_libvulkan(RTLD_NOW, ADRENOTOOLS_DRIVER_CUSTOM, nullptr, dir.c_str(), dir.c_str(),
-                                           "libvulkan_freedreno.so", nullptr, nullptr);
+    void* lib = adrenotools_open_libvulkan(RTLD_NOW, ADRENOTOOLS_DRIVER_CUSTOM, nullptr, d.hook_dir.c_str(),
+                                           d.dir.c_str(), d.file.c_str(), nullptr, nullptr);
     if (!lib) {
         const char* err = dlerror();
         report = std::string("vulkan: adrenotools could not load Turnip (") + (err ? err : "no dlerror") + ")";
@@ -118,8 +125,8 @@ PFN_vkGetInstanceProcAddr LoadTurnip(const std::string& dir, std::string& device
         report = "vulkan: the adrenotools loader has no vkGetInstanceProcAddr";
         return nullptr;
     }
-    device = ProbeDevice(gipa, "Turnip", report);
-    if (device.find("Turnip") == std::string::npos) {
+    device = ProbeDevice(gipa, d.file.c_str(), report);
+    if (device.empty() || (!d.custom && device.find("Turnip") == std::string::npos)) {
         report += device.empty() ? "" : " (not Turnip: the driver did not load)";
         device.clear();
         return nullptr;
@@ -146,7 +153,7 @@ void LogChildLogcat(pid_t pid) {
 
 // Runs LoadTurnip in a forked child first, so that a driver that crashes or hangs on this phone costs a second of
 // startup instead of the game. Returns true if the child found Turnip; its log line comes back through a pipe.
-bool TurnipWorksInChild(const std::string& dir) {
+bool TurnipWorksInChild(const Driver& d) {
     int fds[2];
     if (pipe(fds) != 0) return true;  // cannot test: try in-process
     pid_t pid = fork();
@@ -159,7 +166,7 @@ bool TurnipWorksInChild(const std::string& dir) {
         close(fds[0]);
         alarm(5);
         std::string device, report;
-        bool ok = LoadTurnip(dir, device, report) != nullptr;
+        bool ok = LoadTurnip(d, device, report) != nullptr;
         (void)!write(fds[1], report.data(), report.size());
         _exit(ok ? 0 : 3);
     }
@@ -183,18 +190,29 @@ bool TurnipWorksInChild(const std::string& dir) {
     if (done == 0) {
         kill(pid, SIGKILL);
         waitpid(pid, &status, 0);
-        Log("vulkan: Turnip test hung, using the system driver");
+        Log("vulkan: %s test hung", d.file.c_str());
         return false;
     }
     if (!report.empty()) Log("%s (test process)", report.c_str());
     if (WIFSIGNALED(status)) {
-        Log("vulkan: Turnip test crashed (signal %d), using the system driver", WTERMSIG(status));
+        Log("vulkan: %s test crashed (signal %d)", d.file.c_str(), WTERMSIG(status));
         LogChildLogcat(pid);
         return false;
     }
     bool ok = WIFEXITED(status) && WEXITSTATUS(status) == 0;
     if (!ok) LogChildLogcat(pid);
     return ok;
+}
+
+// The GPU's model from KGSL ("Adreno840v2"), or "" where the file is missing or not readable.
+std::string GpuModel() {
+    char buf[64] = {};
+    if (FILE* f = fopen("/sys/class/kgsl/kgsl-3d0/gpu_model", "r")) {
+        if (!fgets(buf, sizeof(buf), f)) buf[0] = 0;
+        fclose(f);
+    }
+    buf[strcspn(buf, "\r\n")] = 0;
+    return buf;
 }
 
 // Crash guard (working directory = the app's files folder): turnip_pending exists while a Turnip run has not yet
@@ -263,30 +281,47 @@ void SelectVulkanDriver() {
         LogSystemDevice();
         return;
     }
+    // Adreno 8xx: Turnip's support for them is new (an Adreno 840 hung at startup), and Qualcomm's driver there has
+    // Vulkan 1.3, which DXVK needs. vulkan_driver = turnip still tries Turnip.
+    const std::string model = GpuModel();
+    if (!model.empty()) Log("vulkan: GPU %s", model.c_str());
+    const bool skip_bundled = mode == "auto" && model.compare(0, 7, "Adreno8") == 0;
     const char* libdir = getenv("PROTORE_NATIVE_LIB_DIR");  // set by ProtoActivity: the APK's extracted libraries
-    if (!libdir || access((std::string(libdir) + "/libvulkan_freedreno.so").c_str(), F_OK) != 0) {
-        Log("vulkan: no bundled Turnip driver, using the system driver");
+    if (!libdir) {
         LogSystemDevice();
         return;
     }
-    const std::string dir = std::string(libdir) + "/";
-    if (!TurnipWorksInChild(dir)) {
-        Log("vulkan: Turnip not usable, using the system driver");
-        LogSystemDevice();
-        return;
+    const std::string hooks = std::string(libdir) + "/";
+    // The user's own driver (SetupActivity copies it from files/driver/), then the tested Turnip release, then the
+    // newer Mesa for the GPUs the release does not know (Adreno 710/720).
+    std::vector<Driver> drivers;
+    if (const char* custom = getenv("PROTORE_CUSTOM_DRIVER"); custom && access(custom, R_OK) == 0) {
+        std::string path = custom;
+        size_t slash = path.rfind('/');
+        drivers.push_back({hooks, path.substr(0, slash + 1), path.substr(slash + 1), true});
     }
-    std::string device, report;
-    PFN_vkGetInstanceProcAddr gipa = LoadTurnip(dir, device, report);
-    Log("%s", report.c_str());
+    for (const char* file : {"libvulkan_freedreno.so", "libvulkan_freedreno_next.so"}) {
+        if (!skip_bundled && access((hooks + file).c_str(), F_OK) == 0) drivers.push_back({hooks, hooks, file, false});
+    }
+    if (skip_bundled) Log("vulkan: Adreno 8xx: the bundled Turnip is skipped for Qualcomm's driver");
+    PFN_vkGetInstanceProcAddr gipa = nullptr;
+    std::string device;
+    for (const Driver& d : drivers) {
+        if (!TurnipWorksInChild(d)) continue;
+        std::string report;
+        gipa = LoadTurnip(d, device, report);
+        Log("%s (%s)", report.c_str(), d.custom ? "the user's driver" : d.file.c_str());
+        break;  // a second driver in this process after a failed load is not worth the risk
+    }
     if (!gipa) {
-        Log("vulkan: Turnip not usable, using the system driver");
+        Log("vulkan: no usable Turnip, using the system driver");
         LogSystemDevice();
         return;
     }
     char hex[32];
     snprintf(hex, sizeof(hex), "%llx", (unsigned long long)reinterpret_cast<uintptr_t>(gipa));
     setenv("DXVK_VK_GIPA", hex, 1);
-    Log("vulkan: using Turnip (Mesa) on %s", device.c_str());
+    Log("vulkan: using %s", device.c_str());
     if (FILE* f = fopen(kPending, "w")) fclose(f);
     g_turnip_pending = true;
 }

@@ -7,7 +7,8 @@
 # Usage: android/build-turnip.sh <source dir> <install prefix>
 # Needs ANDROID_NDK_HOME (or ANDROID_NDK_LATEST_HOME), cmake, ninja, meson >= 1.4, python3 with mako and pyyaml,
 # bison, flex, glslangValidator, git.
-# Output: <prefix>/lib/libvulkan_freedreno.so, <prefix>/lib/libadrenotools.a and the adrenotools hook libraries
+# Output: <prefix>/lib/libvulkan_freedreno.so and libvulkan_freedreno_next.so, <prefix>/lib/libadrenotools.a and
+# the adrenotools hook libraries
 # (<prefix>/lib/lib*_hook.so, lib*_impl.so: shipped in the APK next to libmain.so), headers in <prefix>/include.
 set -euo pipefail
 
@@ -17,11 +18,17 @@ NDK=${ANDROID_NDK_HOME:-${ANDROID_NDK_LATEST_HOME:?set ANDROID_NDK_HOME}}
 API=29  # adrenotools uses memfd from API 29; older Android is not targeted for Adreno
 JOBS=${JOBS:-$(nproc)}
 
-MESA_TAG=mesa-26.3.0-rc2  # 26.2 lacks Adreno 710/720 (FD710/FD720) and the A8xx parts
+# Two Turnip builds: the 26.2 release (libvulkan_freedreno.so; tested on Adreno 660/735/740) and 26.3, which adds
+# Adreno 710/720 (FD710/FD720) but broke startup on an Adreno 740 (libvulkan_freedreno_next.so). The game tries
+# them in that order (src/native/vulkan_driver.cpp).
+MESA_TAG=mesa-26.2.4
+MESA_NEXT_TAG=mesa-26.3.0-rc2
 ADRENOTOOLS_REV=8fae8ce
 
 mkdir -p "$SRC" "$PREFIX/lib" "$PREFIX/include"
-[ -d "$SRC/mesa" ] || git clone -q --depth 1 --branch $MESA_TAG https://gitlab.freedesktop.org/mesa/mesa.git "$SRC/mesa"
+for tag in $MESA_TAG $MESA_NEXT_TAG; do
+    [ -d "$SRC/$tag" ] || git clone -q --depth 1 --branch $tag https://gitlab.freedesktop.org/mesa/mesa.git "$SRC/$tag"
+done
 if [ ! -d "$SRC/libadrenotools" ]; then
     git clone -q --recurse-submodules https://github.com/bylaws/libadrenotools.git "$SRC/libadrenotools"
     git -C "$SRC/libadrenotools" checkout -q $ADRENOTOOLS_REV
@@ -53,16 +60,21 @@ EOF
 # android-stub links against stub copies of the platform's private libraries instead of an AOSP tree. libc++ is linked
 # statically: the APK ships no libc++_shared.so, and without it the driver fails to load (adrenotools then silently
 # hands out the system driver).
-rm -rf "$SRC/build/mesa"
-meson setup "$SRC/build/mesa" "$SRC/mesa" --cross-file "$CROSS" --buildtype release --prefix "$PREFIX" \
-      -Dplatforms=android -Dplatform-sdk-version=$API -Dandroid-stub=true -Dandroid-libbacktrace=disabled \
-      -Dgallium-drivers= -Dvulkan-drivers=freedreno -Dfreedreno-kmds=kgsl \
-      -Dopengl=false -Dgles1=disabled -Dgles2=disabled -Degl=disabled -Dglx=disabled -Dgbm=disabled \
-      -Dllvm=disabled -Dzstd=disabled -Dexpat=disabled -Dvalgrind=disabled -Dlibunwind=disabled \
-      -Dvulkan-layers= -Dtools= -Dbuild-tests=false -Db_ndebug=true \
-      -Dc_link_args=-static-libstdc++ -Dcpp_link_args=-static-libstdc++
-ninja -C "$SRC/build/mesa" -j "$JOBS" src/freedreno/vulkan/libvulkan_freedreno.so
-cp "$SRC/build/mesa/src/freedreno/vulkan/libvulkan_freedreno.so" "$PREFIX/lib/"
+build_turnip() {  # <tag> <output name>
+    local build="$SRC/build/$1"
+    [ -f "$build/build.ninja" ] ||
+    meson setup "$build" "$SRC/$1" --cross-file "$CROSS" --buildtype release --prefix "$PREFIX" \
+          -Dplatforms=android -Dplatform-sdk-version=$API -Dandroid-stub=true -Dandroid-libbacktrace=disabled \
+          -Dgallium-drivers= -Dvulkan-drivers=freedreno -Dfreedreno-kmds=kgsl \
+          -Dopengl=false -Dgles1=disabled -Dgles2=disabled -Degl=disabled -Dglx=disabled -Dgbm=disabled \
+          -Dllvm=disabled -Dzstd=disabled -Dexpat=disabled -Dvalgrind=disabled -Dlibunwind=disabled \
+          -Dvulkan-layers= -Dtools= -Dbuild-tests=false -Db_ndebug=true \
+          -Dc_link_args=-static-libstdc++ -Dcpp_link_args=-static-libstdc++
+    ninja -C "$build" -j "$JOBS" src/freedreno/vulkan/libvulkan_freedreno.so
+    cp "$build/src/freedreno/vulkan/libvulkan_freedreno.so" "$PREFIX/lib/$2"
+}
+build_turnip $MESA_TAG libvulkan_freedreno.so
+build_turnip $MESA_NEXT_TAG libvulkan_freedreno_next.so
 
 # libadrenotools (static) and its hook libraries.
 cmake -S "$SRC/libadrenotools" -B "$SRC/build/adrenotools" -G Ninja \

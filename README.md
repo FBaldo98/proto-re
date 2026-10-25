@@ -65,6 +65,11 @@ Logs go to the same folder (`proto-native.log`, `app_process64_d3d9.log`) and to
 
 Every key also works as an env var `PROTORE_<KEY>`.
 
+GPU drivers on Adreno: the game tries Turnip 26.2, then Turnip 26.3 (for Adreno 710/720), then the phone's own driver
+(needs Vulkan 1.3). On Adreno 8xx it uses the phone's driver. To use your own driver (an Adreno Vulkan driver `.so`,
+for example a Turnip build made for emulators), put it in `Android/data/com.protore.game/files/driver/`; the game
+tries it first. Delete it from there to go back.
+
 ## Reporting a problem
 
 **Attach the logs to every issue.** Without them a crash can't be fixed, "it crashes" alone tells nothing.
