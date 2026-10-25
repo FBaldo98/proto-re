@@ -127,6 +127,23 @@ PFN_vkGetInstanceProcAddr LoadTurnip(const std::string& dir, std::string& device
     return gipa;
 }
 
+// Why the test failed: an app may read its own logcat, so the test process's lines (bionic's abort message,
+// Mesa's and adrenotools' logs) go to proto-native.log, where the reports come from.
+void LogChildLogcat(pid_t pid) {
+    char cmd[96];
+    snprintf(cmd, sizeof(cmd), "logcat -d -b main,crash -v tag --pid=%d 2>/dev/null", int(pid));
+    FILE* p = popen(cmd, "r");
+    if (!p) return;
+    char line[512];
+    for (int n = 0; n < 80 && fgets(line, sizeof(line), p);) {
+        line[strcspn(line, "\n")] = 0;
+        if (!*line || strstr(line, "beginning of")) continue;
+        Log("vulkan test logcat: %s", line);
+        ++n;
+    }
+    pclose(p);
+}
+
 // Runs LoadTurnip in a forked child first, so that a driver that crashes or hangs on this phone costs a second of
 // startup instead of the game. Returns true if the child found Turnip; its log line comes back through a pipe.
 bool TurnipWorksInChild(const std::string& dir) {
@@ -172,9 +189,12 @@ bool TurnipWorksInChild(const std::string& dir) {
     if (!report.empty()) Log("%s (test process)", report.c_str());
     if (WIFSIGNALED(status)) {
         Log("vulkan: Turnip test crashed (signal %d), using the system driver", WTERMSIG(status));
+        LogChildLogcat(pid);
         return false;
     }
-    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    bool ok = WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    if (!ok) LogChildLogcat(pid);
+    return ok;
 }
 
 // Crash guard (working directory = the app's files folder): turnip_pending exists while a Turnip run has not yet

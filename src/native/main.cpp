@@ -11,6 +11,7 @@
 #include <sched.h>
 #include <signal.h>
 #include <ucontext.h>
+#include <unwind.h>
 #include <unistd.h>
 #ifdef __ANDROID__
 #include <android/log.h>
@@ -110,6 +111,24 @@ void OnCrash(int sig, siginfo_t* info, void* context) {
     DescribeAddress(line, sizeof(line), "pc", static_cast<ucontext_t*>(context)->uc_mcontext.gregs[REG_RIP]);
     CrashWrite(line);
 #endif
+    // The callers: for abort() the pc and lr above are both in libc, the caller that gave up is further up.
+    struct Walk {
+        char* line;
+        size_t size;
+        int depth;
+    } walk = {line, sizeof(line), 0};
+    _Unwind_Backtrace(
+        [](_Unwind_Context* ctx, void* arg) -> _Unwind_Reason_Code {
+            auto* w = static_cast<Walk*>(arg);
+            uintptr_t pc = _Unwind_GetIP(ctx);
+            if (!pc || w->depth >= 24) return _URC_END_OF_STACK;
+            char what[16];
+            snprintf(what, sizeof(what), "#%02d", w->depth++);
+            DescribeAddress(w->line, w->size, what, pc);
+            CrashWrite(w->line);
+            return _URC_NO_REASON;
+        },
+        &walk);
     sigaction(sig, &g_old_actions[sig], nullptr);
     if (info->si_code <= 0) raise(sig);  // sent by kill/tgkill/abort: deliver again; a real fault re-runs on return
 }
