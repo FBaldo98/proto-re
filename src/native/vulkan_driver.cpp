@@ -97,15 +97,57 @@ uint32_t SystemDriverApi(std::string& device) {
     return device.empty() ? 0 : api;
 }
 
+// Logs the device extensions of the system driver: for drivers below Vulkan 1.3, which DXVK could only use through
+// the extensions that became core in 1.2/1.3 (dynamic rendering, synchronization2, timeline semaphores, ...).
+void LogSystemExtensions() {
+    void* lib = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
+    auto gipa = lib ? reinterpret_cast<PFN_vkGetInstanceProcAddr>(dlsym(lib, "vkGetInstanceProcAddr")) : nullptr;
+    auto create = gipa ? reinterpret_cast<PFN_vkCreateInstance>(gipa(nullptr, "vkCreateInstance")) : nullptr;
+    if (!create) return;
+    VkApplicationInfo app{};
+    app.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+    app.apiVersion = VK_API_VERSION_1_1;
+    VkInstanceCreateInfo ci{};
+    ci.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+    ci.pApplicationInfo = &app;
+    VkInstance instance = VK_NULL_HANDLE;
+    if (create(&ci, nullptr, &instance) != VK_SUCCESS) return;
+    auto enumerate = reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(gipa(instance, "vkEnumeratePhysicalDevices"));
+    auto exts = reinterpret_cast<PFN_vkEnumerateDeviceExtensionProperties>(
+        gipa(instance, "vkEnumerateDeviceExtensionProperties"));
+    auto destroy = reinterpret_cast<PFN_vkDestroyInstance>(gipa(instance, "vkDestroyInstance"));
+    uint32_t count = 1;
+    VkPhysicalDevice device = VK_NULL_HANDLE;
+    if (enumerate && exts && enumerate(instance, &count, &device) >= 0 && device) {
+        uint32_t n = 0;
+        exts(device, nullptr, &n, nullptr);
+        std::vector<VkExtensionProperties> list(n);
+        exts(device, nullptr, &n, list.data());
+        std::string line;
+        for (uint32_t i = 0; i < n; ++i) {
+            line += line.empty() ? "" : " ";
+            line += list[i].extensionName;
+            if (line.size() > 400 || i + 1 == n) {
+                Log("vulkan: system driver extensions: %s", line.c_str());
+                line.clear();
+            }
+        }
+    }
+    if (destroy) destroy(instance, nullptr);
+}
+
 void LogSystemDevice() {
     std::string device;
     uint32_t api = SystemDriverApi(device);
     if (!device.empty() && api < VK_API_VERSION_1_3) {
+        LogSystemExtensions();
+        const bool adreno = access("/dev/kgsl-3d0", F_OK) == 0;
         char msg[512];
         snprintf(msg, sizeof(msg),
-                 "The GPU driver of this phone (%s) supports Vulkan %u.%u, and the game needs Vulkan 1.3. "
-                 "The bundled Turnip driver does not support this GPU (yet).",
-                 device.c_str(), VK_API_VERSION_MAJOR(api), VK_API_VERSION_MINOR(api));
+                 "The GPU driver of this phone (%s) supports Vulkan %u.%u, and the game needs Vulkan 1.3. %s",
+                 device.c_str(), VK_API_VERSION_MAJOR(api), VK_API_VERSION_MINOR(api),
+                 adreno ? "The bundled Turnip driver did not work on this GPU either."
+                        : "A system update may bring a newer driver.");
         StartupFailure(msg);
     }
 }
