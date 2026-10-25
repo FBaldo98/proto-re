@@ -67,6 +67,12 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
         final float dx, dy, sizeDp;
         final boolean gameOnly;
         float customX = -1, customY = -1;
+        float size = 1;  // the layout editor's per-button size factor
+        boolean quickPower;  // DISGUISE / ATK PWR / DEFENSE / SENSE: shown only with the "Power buttons" setting
+        // POWERS and DISGUISE hold a selection wheel open: sliding the finger that holds the button moves the mouse,
+        // which is how the game picks an entry, so one thumb is enough. fx/fy: where that finger is.
+        final boolean wheel;
+        float fx, fy;
         float cx, cy, r;
         int pointer = -1;
 
@@ -81,6 +87,9 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
             this.dy = dy;
             this.sizeDp = sizeDp;
             this.gameOnly = gameOnly;
+            this.quickPower = keycode == KeyEvent.KEYCODE_F || keycode == KeyEvent.KEYCODE_1
+                    || keycode == KeyEvent.KEYCODE_3 || keycode == KeyEvent.KEYCODE_4;
+            this.wheel = keycode == KeyEvent.KEYCODE_R || keycode == KeyEvent.KEYCODE_F;
         }
 
         boolean hit(float x, float y) {
@@ -90,8 +99,8 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
     }
 
     // Right thumb: ATTACK in the corner, the inner arc (radius ~105 dp around it) for SPECIAL / GRAB / JUMP, the
-    // outer arc (~190 dp) for the rarer TARGET and SPRINT. Menu keys and POWERS along the top right edge, clear of the
-    // health bar.
+    // outer arc (~190 dp) for the rarer TARGET and SPRINT. Menu keys, POWERS and DISGUISE along the top right edge,
+    // the quick powers below them, clear of the health bar.
     private final Button[] buttons = {
         new Button("ENTER", KeyEvent.KEYCODE_ENTER, 0, true, 280, false, 33, 24, false),
         new Button("ESC", KeyEvent.KEYCODE_ESCAPE, 0, true, 100, false, 33, 24, false),
@@ -101,13 +110,19 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
         new Button("JUMP", KeyEvent.KEYCODE_SPACE, 0, true, 66, true, 180, 33, true),
         new Button("TARGET", KeyEvent.KEYCODE_TAB, 0, true, 258, true, 140, 27, true),  // lock-on is Tab on PC
         new Button("SPRINT", KeyEvent.KEYCODE_SHIFT_LEFT, 0, true, 168, true, 245, 27, true),
-        new Button("POWERS", 0, MOUSE_MIDDLE, true, 190, false, 33, 24, true),  // power wheel: middle button
+        new Button("POWERS", KeyEvent.KEYCODE_R, 0, true, 190, false, 33, 24, true),  // Power Select Menu: R
+        // Quick powers (PC keys from the game's Keyboard Setup): last disguise power menu, last attack, defense and
+        // sensory power. Appended, so the saved positions of the buttons above keep their indices.
+        new Button("DISGUISE", KeyEvent.KEYCODE_F, 0, true, 370, false, 33, 24, true),
+        new Button("ATK PWR", KeyEvent.KEYCODE_1, 0, true, 280, false, 95, 22, true),
+        new Button("DEFENSE", KeyEvent.KEYCODE_3, 0, true, 190, false, 95, 22, true),
+        new Button("SENSE", KeyEvent.KEYCODE_4, 0, true, 100, false, 95, 22, true),
     };
 
     // ---- settings ----
     private final SharedPreferences prefs;
     private float opacity, scale;
-    private boolean vibrate, showFps, hideWithPad, autoRun, invertY;
+    private boolean vibrate, showFps, hideWithPad, autoRun, invertY, powerButtons;
     private float camGain;
     private boolean padConnected;
 
@@ -150,8 +165,9 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
         new Setting("Camera speed", "ui_cam", new String[] {"50%", "75%", "100%", "150%", "200%"},
                 new int[] {50, 75, 100, 150, 200}, false),
         new Setting("Invert Y", "ui_invert", new String[] {"Off", "On"}, new int[] {0, 1}, false),
+        new Setting("Power buttons", "ui_power_buttons", new String[] {"Off", "On"}, new int[] {0, 1}, false),
     };
-    private static final int[] DEFAULTS = {1, 1, 0, 0, 2, 1, 1, 0, 0, 0, 2, 0};
+    private static final int[] DEFAULTS = {1, 1, 0, 0, 2, 1, 1, 0, 0, 0, 2, 0, 0};
     private boolean panelOpen = false, restartNeeded = false;
     private final RectF panel = new RectF(), restartRect = new RectF(), closeRect = new RectF(),
             layoutRect = new RectF();
@@ -159,6 +175,10 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
     // ---- layout editor ----
     private boolean editing = false;
     private final RectF doneRect = new RectF(), resetRect = new RectF();
+    private final RectF smallerRect = new RectF(), biggerRect = new RectF();
+    private Button selected;          // the button (or stick) the size buttons act on
+    private boolean selectedStick;
+    private float stickSize = 1;
     private Button dragButton;
     private boolean dragStick;
     private int dragPointer = -1;
@@ -259,6 +279,7 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
         autoRun = settings[9].value() != 0;
         camGain = settings[10].value() / 100f;
         invertY = settings[11].value() != 0;
+        powerButtons = settings[12].value() != 0;
         layoutButtons(getWidth(), getHeight());
     }
 
@@ -266,9 +287,11 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
         for (int i = 0; i < buttons.length; i++) {
             buttons[i].customX = prefs.getFloat("pos" + i + "x", -1);
             buttons[i].customY = prefs.getFloat("pos" + i + "y", -1);
+            buttons[i].size = prefs.getFloat("size" + i, 1);
         }
         stickCustomX = prefs.getFloat("stick_x", -1);
         stickCustomY = prefs.getFloat("stick_y", -1);
+        stickSize = prefs.getFloat("stick_size", 1);
     }
 
     private void saveLayout() {
@@ -276,9 +299,11 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
         SharedPreferences.Editor ed = prefs.edit();
         for (int i = 0; i < buttons.length; i++) {
             Button b = buttons[i];
+            ed.putFloat("size" + i, b.size);
             if (b.customX < 0) continue;
             ed.putFloat("pos" + i + "x", b.cx / w).putFloat("pos" + i + "y", b.cy / h);
         }
+        ed.putFloat("stick_size", stickSize);
         if (stickCustomX >= 0) ed.putFloat("stick_x", stickHomeX / w).putFloat("stick_y", stickHomeY / h);
         ed.apply();
     }
@@ -287,10 +312,14 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
         SharedPreferences.Editor ed = prefs.edit();
         for (int i = 0; i < buttons.length; i++) {
             buttons[i].customX = buttons[i].customY = -1;
-            ed.remove("pos" + i + "x").remove("pos" + i + "y");
+            buttons[i].size = 1;
+            ed.remove("pos" + i + "x").remove("pos" + i + "y").remove("size" + i);
         }
         stickCustomX = stickCustomY = -1;
-        ed.remove("stick_x").remove("stick_y").apply();
+        stickSize = 1;
+        selected = null;
+        selectedStick = false;
+        ed.remove("stick_x").remove("stick_y").remove("stick_size").apply();
         layoutButtons(getWidth(), getHeight());
     }
 
@@ -338,7 +367,7 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
     private void layoutButtons(int w, int h) {
         final float u = density * scale;
         for (Button b : buttons) {
-            b.r = b.sizeDp * u;
+            b.r = b.sizeDp * u * b.size;
             if (b.customX >= 0) {
                 b.cx = b.customX * w;
                 b.cy = b.customY * h;
@@ -347,7 +376,7 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
                 b.cy = b.fromBottom ? h - b.dy * u : b.dy * u;
             }
         }
-        stickR = 62 * u;
+        stickR = 62 * u * stickSize;
         if (stickCustomX >= 0) {
             stickHomeX = stickCustomX * w;
             stickHomeY = stickCustomY * h;
@@ -470,6 +499,7 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
     }
 
     private boolean visible(Button b) {
+        if (b.quickPower && !powerButtons) return false;  // off by default: the screen was too busy
         return editing || (!controlsHidden() && (gameMode || !b.gameOnly));
     }
 
@@ -496,8 +526,24 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
                     buzz();
                     break;
                 }
+                if ((selected != null || selectedStick) && (smallerRect.contains(x, y) || biggerRect.contains(x, y))) {
+                    float step = biggerRect.contains(x, y) ? 0.1f : -0.1f;
+                    if (selected != null) {
+                        selected.size = Math.max(0.6f, Math.min(2f, selected.size + step));
+                    } else {
+                        stickSize = Math.max(0.6f, Math.min(2f, stickSize + step));
+                    }
+                    float sx = stickHomeX, sy = stickHomeY;
+                    layoutButtons(getWidth(), getHeight());
+                    if (stickCustomX < 0) {  // keep a stick that was not moved where it is drawn
+                        stickHomeX = stickX = knobX = sx;
+                        stickHomeY = stickY = knobY = sy;
+                    }
+                    buzz();
+                    break;
+                }
                 for (Button b : buttons) {
-                    if (b.hit(x, y)) {
+                    if (visible(b) && b.hit(x, y)) {
                         dragButton = b;
                         dragDx = b.cx - x;
                         dragDy = b.cy - y;
@@ -514,6 +560,8 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
                 }
                 if (dragButton != null || dragStick) {
                     dragPointer = id;
+                    selected = dragButton;
+                    selectedStick = dragStick;
                     buzz();
                 }
                 break;
@@ -586,6 +634,8 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
                     }
                 }
                 if (hit != null) {
+                    hit.fx = x;
+                    hit.fy = y;
                     press(hit, id);
                 } else if (gameMode && !controlsHidden() && stickPointer < 0 && x < getWidth() * 0.4f
                         && y > getHeight() * 0.35f) {
@@ -608,7 +658,13 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
                 for (int i = 0; i < e.getPointerCount(); i++) {
                     int pid = e.getPointerId(i);
                     float px = e.getX(i), py = e.getY(i);
-                    if (pid == stickPointer) {
+                    Button held = pointerButton.get(pid);
+                    if (held != null && held.wheel) {
+                        float g = 2.5f * camGain;
+                        mouseMoveBy((px - held.fx) * g, (py - held.fy) * g);
+                        held.fx = px;
+                        held.fy = py;
+                    } else if (pid == stickPointer) {
                         updateStick(px, py);
                     } else if (pid == lookPointer) {
                         float g = 1.5f * camGain;
@@ -752,6 +808,12 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
 
     private void drawButton(Canvas c, Button b) {
         final boolean down = b.pointer >= 0;
+        if (down && b.wheel) {  // where the held finger points the wheel
+            edge.setStrokeWidth(3 * density);
+            edge.setColor(0xccffffff);
+            c.drawLine(b.cx, b.cy, b.fx, b.fy, edge);
+            c.drawCircle(b.fx, b.fy, 10 * density, edge);
+        }
         Bitmap bmp = cached(b.label + (down ? ":1:" : ":0:") + b.r, b.r + 12 * density,
                 (cc, x, y) -> paintButton(cc, b, x, y, down));
         blitCentered(c, bmp, b.cx, b.cy);
@@ -930,15 +992,68 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
     private void drawEditor(Canvas c) {
         c.drawColor(0x66000000);
         drawStick(c);
-        for (Button b : buttons) drawButton(c, b);
-        float cx = getWidth() / 2f, top = 16 * density;
+        for (Button b : buttons) {
+            if (visible(b)) drawButton(c, b);
+        }
+        float cx = getWidth() * 0.38f, top = 16 * density;  // left of centre: clear of the buttons on the top right
         text.setTextSize(15 * density);
         text.setColor(0xffffe0dc);
-        c.drawText("Drag the buttons and the stick", cx, top + 70 * density, text);
+        c.drawText("Drag the buttons and the stick, tap one to resize it", cx, top + 70 * density, text);
         resetRect.set(cx - 162 * density, top, cx - 12 * density, top + 38 * density);
         doneRect.set(cx + 12 * density, top, cx + 162 * density, top + 38 * density);
         drawPill(c, resetRect, "RESET", false);
         drawPill(c, doneRect, "DONE", true);
+        if (selected != null || selectedStick) {
+            float sx = selected != null ? selected.cx : stickHomeX, sy = selected != null ? selected.cy : stickHomeY;
+            float sr = selected != null ? selected.r : stickR;
+            edge.setStrokeWidth(2.5f * density);
+            edge.setColor(0xffffffff);
+            c.drawCircle(sx, sy, sr + 6 * density, edge);
+            float y = top + 96 * density, size = selected != null ? selected.size : stickSize;
+            smallerRect.set(cx - 150 * density, y, cx - 60 * density, y + 38 * density);
+            biggerRect.set(cx + 60 * density, y, cx + 150 * density, y + 38 * density);
+            drawPill(c, smallerRect, "\u2212", false);
+            drawPill(c, biggerRect, "+", false);
+            text.setTextSize(15 * density);
+            text.setColor(0xffffe0dc);
+            c.drawText((selected != null ? selected.label : "STICK") + "  " + Math.round(size * 100) + "%", cx,
+                    y + 25 * density, text);
+        } else {
+            smallerRect.setEmpty();
+            biggerRect.setEmpty();
+        }
+    }
+
+    // Screenshot of this layer for testing (the game's own shot_now trigger only has the game frame): a file named
+    // ui_shot_now in the app's files folder makes the controls draw themselves into ui_shot.png there.
+    private final Runnable uiShotPoll = new Runnable() {
+        @Override public void run() {
+            File dir = getContext().getExternalFilesDir(null);
+            File trigger = dir == null ? null : new File(dir, "ui_shot_now");
+            if (trigger != null && trigger.delete() && getWidth() > 0) {
+                Bitmap bmp = Bitmap.createBitmap(getWidth(), getHeight(), Bitmap.Config.ARGB_8888);
+                draw(new Canvas(bmp));
+                try (java.io.FileOutputStream out = new java.io.FileOutputStream(new File(dir, "ui_shot.png"))) {
+                    bmp.compress(Bitmap.CompressFormat.PNG, 100, out);
+                } catch (java.io.IOException ignored) {
+                    // a test aid only
+                }
+                bmp.recycle();
+            }
+            postDelayed(this, 1000);
+        }
+    };
+
+    @Override
+    protected void onAttachedToWindow() {
+        super.onAttachedToWindow();
+        postDelayed(uiShotPoll, 1000);
+    }
+
+    @Override
+    protected void onDetachedFromWindow() {
+        removeCallbacks(uiShotPoll);
+        super.onDetachedFromWindow();
     }
 
     @Override

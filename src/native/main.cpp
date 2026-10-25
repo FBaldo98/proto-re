@@ -320,7 +320,9 @@ int main(int argc, char** argv) {
     SelectVulkanDriver();  // Adreno: the bundled Turnip driver
     // audio_driver = aaudio | openslES: SDL's audio backend (FAudio opens SDL audio later); AAudio by default.
     if (std::string ad = Setting("audio_driver", ""); !ad.empty()) setenv("SDL_AUDIODRIVER", ad.c_str(), 1);
-    if (SettingInt("present_stats", 0)) setenv("DXVK_PRESENT_STATS", "1", 0);  // Present timing in the DXVK log
+    if (SettingInt("present_stats", 0)) setenv("DXVK_PRESENT_STATS", "1", 0);
+    // Test aid: DXVK's dummy resources instead of null descriptors, as on Mali drivers without VK_EXT_robustness2.
+    if (SettingInt("dxvk_no_null_descriptor", 0)) setenv("DXVK_NO_NULL_DESCRIPTOR", "1", 0);  // Present timing in the DXVK log
     // dxvk_config = d3d9.presentInterval = 1, d3d9.numBackBuffers = 3  (DXVK options; ',' as ';' starts an ini
     // comment)
     if (std::string dc = Setting("dxvk_config", ""); !dc.empty()) {
@@ -329,6 +331,11 @@ int main(int argc, char** argv) {
     }
 
     // The game window: DXVK's native WSI takes the SDL window as HWND.
+#ifdef __ANDROID__
+    // SDL sets the activity's orientation from the window it creates, and for a resizable window it allows portrait
+    // too, overriding the manifest: holding the phone upright then turned the game sideways. Landscape both ways only.
+    SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
+#endif
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_GAMECONTROLLER) != 0) Fatal("SDL_Init: %s", SDL_GetError());
     g_sdl_window = SDL_CreateWindow("Prototype", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1280, 720,
                                     SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE

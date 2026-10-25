@@ -184,7 +184,7 @@ index 7339f8c..a04b3f3 100644
      std::string shaderDumpPath;
  
 diff --git a/src/d3d9/d3d9_swapchain.cpp b/src/d3d9/d3d9_swapchain.cpp
-index 391cec8..e44413c 100644
+index 391cec8..7101c4b 100644
 --- a/src/d3d9/d3d9_swapchain.cpp
 +++ b/src/d3d9/d3d9_swapchain.cpp
 @@ -5,6 +5,8 @@
@@ -234,7 +234,7 @@ index 391cec8..e44413c 100644
      m_parent->EndFrame();
      m_parent->Flush();
  
-@@ -827,7 +859,22 @@ namespace dxvk {
+@@ -827,7 +859,24 @@ namespace dxvk {
      Rc<DxvkImageView> swapImageView = m_backBuffers[0]->GetImageView(false);
  
      for (uint32_t i = 0; i < SyncInterval || i < 1; i++) {
@@ -248,8 +248,10 @@ index 391cec8..e44413c 100644
 +      double t1 = g_presentStats.on ? D3D9PresentStats::now() : 0;
 +      // VK_SUBOPTIMAL_KHR: Android reports it every frame while the display is rotated against the swap chain's
 +      // transform (landscape); the compositor rotates, so present as is instead of recreating the swap chain -
-+      // with a GPU idle wait - every frame.
-+      if (submitStatus != VK_SUCCESS && submitStatus != VK_SUBOPTIMAL_KHR)
++      // with a GPU idle wait - every frame. Unless the window itself changed size (it starts out portrait for a
++      // moment, or the device was rotated): then the swap chain is recreated, or the picture stays wrong.
++      if ((submitStatus != VK_SUCCESS && submitStatus != VK_SUBOPTIMAL_KHR)
++       || (submitStatus == VK_SUBOPTIMAL_KHR && AndroidWindowResized()))
 +        RecreateSwapChain();
 +#else
        SynchronizePresent();
@@ -257,7 +259,7 @@ index 391cec8..e44413c 100644
  
        // Presentation semaphores and WSI swap chain image
        PresenterInfo info = m_wctx->presenter->info();
-@@ -835,9 +882,35 @@ namespace dxvk {
+@@ -835,9 +884,35 @@ namespace dxvk {
  
        uint32_t imageIndex = 0;
  
@@ -286,14 +288,14 @@ index 391cec8..e44413c 100644
 +#endif
  
 +#ifdef __ANDROID__
-+      while (status != VK_SUCCESS && status != VK_SUBOPTIMAL_KHR) {  // see above
++      while (status != VK_SUCCESS && (status != VK_SUBOPTIMAL_KHR || AndroidWindowResized())) {  // see above
 +#else
        while (status != VK_SUCCESS) {
 +#endif
          RecreateSwapChain();
          
          info = m_wctx->presenter->info();
-@@ -913,7 +986,42 @@ namespace dxvk {
+@@ -913,7 +988,42 @@ namespace dxvk {
        m_parent->FlushCsChunk();
      }
  
@@ -336,6 +338,38 @@ index 391cec8..e44413c 100644
  
      // Rotate swap chain buffers so that the back
      // buffer at index 0 becomes the front buffer.
+@@ -932,6 +1042,16 @@ namespace dxvk {
+       RecreateSwapChain();
+   }
+ 
++#ifdef __ANDROID__
++  bool D3D9SwapChainEx::AndroidWindowResized() {
++    uint32_t width = 0, height = 0;
++    wsi::getWindowSize(m_window, &width, &height);
++    VkExtent2D extent = m_wctx->presenter->info().imageExtent;
++    return width && height && (width != extent.width || height != extent.height);
++  }
++#endif
++
++
+   void D3D9SwapChainEx::RecreateSwapChain() {
+     // Ensure that we can safely destroy the swap chain
+     m_device->waitForSubmission(&m_presentStatus);
+diff --git a/src/d3d9/d3d9_swapchain.h b/src/d3d9/d3d9_swapchain.h
+index 8d80493..863dbad 100644
+--- a/src/d3d9/d3d9_swapchain.h
++++ b/src/d3d9/d3d9_swapchain.h
+@@ -197,6 +197,10 @@ namespace dxvk {
+ 
+     void RecreateSwapChain();
+ 
++#ifdef __ANDROID__
++    bool AndroidWindowResized();
++#endif
++
+     void CreatePresenter();
+ 
+     VkResult CreateSurface(VkSurfaceKHR* pSurface);
 diff --git a/src/dxso/dxso_compiler.cpp b/src/dxso/dxso_compiler.cpp
 index d7cdc67..29299ee 100644
 --- a/src/dxso/dxso_compiler.cpp
@@ -366,7 +400,7 @@ index d7cdc67..29299ee 100644
      this->emitFunctionEnd();
    }
 diff --git a/src/dxvk/dxvk_adapter.cpp b/src/dxvk/dxvk_adapter.cpp
-index 1285c4e..151caa9 100644
+index 1285c4e..15e8e3a 100644
 --- a/src/dxvk/dxvk_adapter.cpp
 +++ b/src/dxvk/dxvk_adapter.cpp
 @@ -165,104 +165,126 @@ namespace dxvk {
@@ -590,7 +624,7 @@ index 1285c4e..151caa9 100644
    }
  
  #undef CHECK_FEATURE_NEED
-@@ -489,6 +511,32 @@ namespace dxvk {
+@@ -489,6 +511,37 @@ namespace dxvk {
      if (devExtensions.amdMemoryOverallocationBehaviour)
        overallocInfo.pNext = std::exchange(info.pNext, &overallocInfo);
      
@@ -611,6 +645,11 @@ index 1285c4e..151caa9 100644
 +    CLAMP_FEATURES(extNonSeamlessCubeMap);
 +    CLAMP_FEATURES(extPageableDeviceLocalMemory);
 +    CLAMP_FEATURES(extRobustness2);
++
++    // Android port: DXVK_NO_NULL_DESCRIPTOR=1 runs the dummy-resource path (dxvk_unbound.cpp) on drivers that
++    // have null descriptors, to test what Mali drivers without VK_EXT_robustness2 get.
++    if (env::getEnvVar("DXVK_NO_NULL_DESCRIPTOR") == "1")
++      enabledFeatures.extRobustness2.nullDescriptor = VK_FALSE;
 +    CLAMP_FEATURES(extShaderModuleIdentifier);
 +    CLAMP_FEATURES(extSwapchainMaintenance1);
 +    CLAMP_FEATURES(extTransformFeedback);
@@ -623,7 +662,7 @@ index 1285c4e..151caa9 100644
      VkDevice device = VK_NULL_HANDLE;
      VkResult vr = m_vki->vkCreateDevice(m_handle, &info, nullptr, &device);
  
-@@ -511,7 +559,7 @@ namespace dxvk {
+@@ -511,7 +564,7 @@ namespace dxvk {
      }
  
      if (vr != VK_SUCCESS)
@@ -656,6 +695,156 @@ index 364d7a5..fa9185b 100644
    }
  
  
+diff --git a/src/dxvk/dxvk_context.cpp b/src/dxvk/dxvk_context.cpp
+index c0c3d92..356a792 100644
+--- a/src/dxvk/dxvk_context.cpp
++++ b/src/dxvk/dxvk_context.cpp
+@@ -1014,6 +1014,34 @@ namespace dxvk {
+   }
+ 
+ 
++  // Android port: without VK_EXT_robustness2 null descriptors (Mali), unbound slots get dummy resources.
++  VkImageView DxvkContext::nullImageView(VkImageViewType type) {
++    if (likely(m_device->features().extRobustness2.nullDescriptor))
++      return VK_NULL_HANDLE;
++    return m_common->dummyResources().imageViewHandle(this, type);
++  }
++
++
++  VkImageLayout DxvkContext::nullImageLayout() const {
++    return m_device->features().extRobustness2.nullDescriptor
++      ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_GENERAL;
++  }
++
++
++  VkBufferView DxvkContext::nullBufferView() {
++    if (likely(m_device->features().extRobustness2.nullDescriptor))
++      return VK_NULL_HANDLE;
++    return m_common->dummyResources().bufferViewHandle();
++  }
++
++
++  VkBuffer DxvkContext::nullBuffer() {
++    if (likely(m_device->features().extRobustness2.nullDescriptor))
++      return VK_NULL_HANDLE;
++    return m_common->dummyResources().bufferHandle();
++  }
++
++
+   void DxvkContext::initImage(
+     const Rc<DxvkImage>&            image,
+     const VkImageSubresourceRange&  subresources,
+@@ -5367,8 +5395,8 @@ namespace dxvk {
+               m_cmd->track(res.imageView->image(), DxvkAccess::Read);
+             } else {
+               descriptorInfo.image.sampler = VK_NULL_HANDLE;
+-              descriptorInfo.image.imageView = VK_NULL_HANDLE;
+-              descriptorInfo.image.imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
++              descriptorInfo.image.imageView = nullImageView(binding.viewType);
++              descriptorInfo.image.imageLayout = nullImageLayout();
+             }
+           } break;
+ 
+@@ -5389,8 +5417,8 @@ namespace dxvk {
+                 ? DxvkAccess::Write : DxvkAccess::Read);
+             } else {
+               descriptorInfo.image.sampler = VK_NULL_HANDLE;
+-              descriptorInfo.image.imageView = VK_NULL_HANDLE;
+-              descriptorInfo.image.imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
++              descriptorInfo.image.imageView = nullImageView(binding.viewType);
++              descriptorInfo.image.imageLayout = nullImageLayout();
+             }
+           } break;
+ 
+@@ -5411,8 +5439,8 @@ namespace dxvk {
+               m_cmd->track(res.imageView->image(), DxvkAccess::Read);
+             } else {
+               descriptorInfo.image.sampler = m_common->dummyResources().samplerHandle();
+-              descriptorInfo.image.imageView = VK_NULL_HANDLE;
+-              descriptorInfo.image.imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
++              descriptorInfo.image.imageView = nullImageView(binding.viewType);
++              descriptorInfo.image.imageLayout = nullImageLayout();
+             }
+           } break;
+ 
+@@ -5424,7 +5452,7 @@ namespace dxvk {
+ 
+               m_cmd->track(res.bufferView->buffer(), DxvkAccess::Read);
+             } else {
+-              descriptorInfo.texelBuffer = VK_NULL_HANDLE;
++              descriptorInfo.texelBuffer = nullBufferView();
+             }
+           } break;
+ 
+@@ -5437,7 +5465,7 @@ namespace dxvk {
+               m_cmd->track(res.bufferView->buffer(), (binding.access & vk::AccessWriteMask)
+                 ? DxvkAccess::Write : DxvkAccess::Read);
+             } else {
+-              descriptorInfo.texelBuffer = VK_NULL_HANDLE;
++              descriptorInfo.texelBuffer = nullBufferView();
+             }
+           } break;
+ 
+@@ -5449,7 +5477,7 @@ namespace dxvk {
+ 
+               m_cmd->track(res.bufferSlice.buffer(), DxvkAccess::Read);
+             } else {
+-              descriptorInfo.buffer.buffer = VK_NULL_HANDLE;
++              descriptorInfo.buffer.buffer = nullBuffer();
+               descriptorInfo.buffer.offset = 0;
+               descriptorInfo.buffer.range = VK_WHOLE_SIZE;
+             }
+@@ -5464,7 +5492,7 @@ namespace dxvk {
+               m_cmd->track(res.bufferSlice.buffer(), (binding.access & vk::AccessWriteMask)
+                 ? DxvkAccess::Write : DxvkAccess::Read);
+             } else {
+-              descriptorInfo.buffer.buffer = VK_NULL_HANDLE;
++              descriptorInfo.buffer.buffer = nullBuffer();
+               descriptorInfo.buffer.offset = 0;
+               descriptorInfo.buffer.range = VK_WHOLE_SIZE;
+             }
+@@ -5785,9 +5813,9 @@ namespace dxvk {
+ 
+         m_cmd->track(m_state.vi.vertexBuffers[binding].buffer(), DxvkAccess::Read);
+       } else {
+-        buffers[i] = VK_NULL_HANDLE;
++        buffers[i] = nullBuffer();
+         offsets[i] = 0;
+-        lengths[i] = 0;
++        lengths[i] = buffers[i] ? VK_WHOLE_SIZE : 0;
+         strides[i] = 0;
+       }
+     }
+diff --git a/src/dxvk/dxvk_context.h b/src/dxvk/dxvk_context.h
+index a978af1..b67b11b 100644
+--- a/src/dxvk/dxvk_context.h
++++ b/src/dxvk/dxvk_context.h
+@@ -905,6 +905,12 @@ namespace dxvk {
+       const VkImageSubresourceRange&  subresources,
+             VkImageLayout             initialLayout);
+ 
++    // Android port: dummy resources for unbound slots on drivers without null descriptors.
++    VkImageView nullImageView(VkImageViewType type);
++    VkImageLayout nullImageLayout() const;
++    VkBufferView nullBufferView();
++    VkBuffer nullBuffer();
++
+     /**
+      * \brief Initializes sparse image
+      *
+diff --git a/src/dxvk/dxvk_extensions.h b/src/dxvk/dxvk_extensions.h
+index b8df6d1..5096d44 100644
+--- a/src/dxvk/dxvk_extensions.h
++++ b/src/dxvk/dxvk_extensions.h
+@@ -310,7 +310,7 @@ namespace dxvk {
+     DxvkExt extMemoryPriority                 = { VK_EXT_MEMORY_PRIORITY_EXTENSION_NAME,                    DxvkExtMode::Optional };
+     DxvkExt extNonSeamlessCubeMap             = { VK_EXT_NON_SEAMLESS_CUBE_MAP_EXTENSION_NAME,              DxvkExtMode::Optional };
+     DxvkExt extPageableDeviceLocalMemory      = { VK_EXT_PAGEABLE_DEVICE_LOCAL_MEMORY_EXTENSION_NAME,       DxvkExtMode::Optional };
+-    DxvkExt extRobustness2                    = { VK_EXT_ROBUSTNESS_2_EXTENSION_NAME,                       DxvkExtMode::Required };
++    DxvkExt extRobustness2                    = { VK_EXT_ROBUSTNESS_2_EXTENSION_NAME,                       DxvkExtMode::Optional };  // Android port: Mali lacks it
+     DxvkExt extShaderModuleIdentifier         = { VK_EXT_SHADER_MODULE_IDENTIFIER_EXTENSION_NAME,           DxvkExtMode::Optional };
+     DxvkExt extShaderStencilExport            = { VK_EXT_SHADER_STENCIL_EXPORT_EXTENSION_NAME,              DxvkExtMode::Optional };
+     DxvkExt extSwapchainColorSpace            = { VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME,              DxvkExtMode::Optional };
 diff --git a/src/dxvk/dxvk_presenter.cpp b/src/dxvk/dxvk_presenter.cpp
 index 27d6bb1..922f178 100644
 --- a/src/dxvk/dxvk_presenter.cpp
@@ -712,6 +901,166 @@ index 27d6bb1..922f178 100644
  
      return status;
    }
+diff --git a/src/dxvk/dxvk_unbound.cpp b/src/dxvk/dxvk_unbound.cpp
+index 63e3f4d..25e17b8 100644
+--- a/src/dxvk/dxvk_unbound.cpp
++++ b/src/dxvk/dxvk_unbound.cpp
+@@ -1,3 +1,4 @@
++#include "dxvk_context.h"
+ #include "dxvk_device.h"
+ 
+ namespace dxvk {
+@@ -53,6 +54,89 @@ namespace dxvk {
+   }
+ 
+ 
++  VkImageView DxvkUnboundResources::imageViewHandle(DxvkContext* ctx, VkImageViewType type) {
++    VkImageView view = m_viewHandles[type].load();
++
++    if (likely(view != VK_NULL_HANDLE))
++      return view;
++
++    std::lock_guard lock(m_mutex);
++    view = m_viewHandles[type].load();
++
++    if (view)
++      return view;
++
++    uint32_t family = (type == VK_IMAGE_VIEW_TYPE_1D || type == VK_IMAGE_VIEW_TYPE_1D_ARRAY) ? 0u
++                    : (type == VK_IMAGE_VIEW_TYPE_3D) ? 2u : 1u;
++
++    if (m_images[family] == nullptr) {
++      Logger::info(str::format("DxvkUnboundResources: no null descriptors, dummy image for view type ", type));
++
++      DxvkImageCreateInfo info;
++      info.type        = family == 0u ? VK_IMAGE_TYPE_1D : family == 2u ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
++      info.format      = VK_FORMAT_R8G8B8A8_UNORM;
++      info.flags       = family == 1u ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0u;
++      info.sampleCount = VK_SAMPLE_COUNT_1_BIT;
++      info.extent      = { 1u, 1u, 1u };
++      info.numLayers   = family == 1u ? 6u : 1u;
++      info.mipLevels   = 1u;
++      info.usage       = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
++      info.stages      = VK_PIPELINE_STAGE_TRANSFER_BIT | m_device->getShaderPipelineStages();
++      info.access      = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
++      info.layout      = VK_IMAGE_LAYOUT_GENERAL;
++      info.debugName   = "Null image";
++
++      m_images[family] = m_device->createImage(info, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
++
++      DxvkImageViewKey key;
++      key.viewType   = family == 0u ? VK_IMAGE_VIEW_TYPE_1D_ARRAY
++                     : family == 2u ? VK_IMAGE_VIEW_TYPE_3D : VK_IMAGE_VIEW_TYPE_2D_ARRAY;
++      key.usage      = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
++      key.format     = info.format;
++      key.aspects    = VK_IMAGE_ASPECT_COLOR_BIT;
++      key.mipIndex   = 0u;
++      key.mipCount   = 1u;
++      key.layerIndex = 0u;
++      key.layerCount = uint16_t(info.numLayers);
++      m_imageViews[family] = m_images[family]->createView(key);
++
++      VkImageSubresourceRange range = { VK_IMAGE_ASPECT_COLOR_BIT, 0u, 1u, 0u, info.numLayers };
++      ctx->initImage(m_images[family], range, VK_IMAGE_LAYOUT_UNDEFINED);
++    }
++
++    view = m_imageViews[family]->handle(type);
++    m_viewHandles[type].store(view, std::memory_order_release);
++    return view;
++  }
++
++
++  VkBufferView DxvkUnboundResources::bufferViewHandle() {
++    VkBufferView view = m_bufferViewHandle.load();
++
++    if (likely(view != VK_NULL_HANDLE))
++      return view;
++
++    bufferHandle();  // creates the buffer
++
++    std::lock_guard lock(m_mutex);
++    view = m_bufferViewHandle.load();
++
++    if (view)
++      return view;
++
++    DxvkBufferViewKey key;
++    key.format = VK_FORMAT_R32_UINT;
++    key.usage  = VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT;
++    key.offset = 0u;
++    key.size   = m_buffer->info().size;
++    m_bufferView = m_buffer->createView(key);
++
++    view = m_bufferView->handle();
++    m_bufferViewHandle.store(view, std::memory_order_release);
++    return view;
++  }
++
++
+   Rc<DxvkSampler> DxvkUnboundResources::createSampler() {
+     DxvkSamplerKey info;
+     info.setFilter(VK_FILTER_LINEAR, VK_FILTER_LINEAR, VK_SAMPLER_MIPMAP_MODE_LINEAR);
+@@ -76,8 +160,11 @@ namespace dxvk {
+                     | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT
+                     | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                     | VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT
+-                    | VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT
+-                    | VK_BUFFER_USAGE_TRANSFORM_FEEDBACK_BUFFER_BIT_EXT;
++                    | VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT;
++
++    // Android port: not on drivers without transform feedback (Mali), where the usage bit is invalid
++    if (m_device->features().extTransformFeedback.transformFeedback)
++      info.usage |= VK_BUFFER_USAGE_TRANSFORM_FEEDBACK_BUFFER_BIT_EXT;
+     info.stages     = VK_PIPELINE_STAGE_TRANSFER_BIT
+                     | m_device->getShaderPipelineStages();
+     info.access     = VK_ACCESS_UNIFORM_READ_BIT
+diff --git a/src/dxvk/dxvk_unbound.h b/src/dxvk/dxvk_unbound.h
+index 9caa9fd..55d0ece 100644
+--- a/src/dxvk/dxvk_unbound.h
++++ b/src/dxvk/dxvk_unbound.h
+@@ -43,7 +43,28 @@ namespace dxvk {
+      * \returns Dummy sampler descriptor
+      */
+     VkSampler samplerHandle();
+-    
++
++    /**
++     * \brief Dummy image view (Android port)
++     *
++     * For drivers without VK_EXT_robustness2 null descriptors (Arm's Mali
++     * drivers): a 1x1 zero image of a compatible type. The first call for
++     * an image type clears it through the given context.
++     * \param [in] ctx Context to initialize the image with
++     * \param [in] type View type the descriptor expects
++     * \returns Dummy image view handle
++     */
++    VkImageView imageViewHandle(DxvkContext* ctx, VkImageViewType type);
++
++    /**
++     * \brief Dummy texel buffer view (Android port)
++     *
++     * R32_UINT view of the dummy buffer, for drivers without null
++     * descriptors.
++     * \returns Dummy buffer view handle
++     */
++    VkBufferView bufferViewHandle();
++
+   private:
+     
+     DxvkDevice*             m_device;
+@@ -54,6 +75,12 @@ namespace dxvk {
+     dxvk::mutex             m_mutex;
+     Rc<DxvkSampler>         m_sampler;
+     Rc<DxvkBuffer>          m_buffer;
++
++    std::atomic<VkImageView> m_viewHandles[VK_IMAGE_VIEW_TYPE_CUBE_ARRAY + 1] = { };
++    Rc<DxvkImage>           m_images[3];  // 1D, 2D (cube compatible, 6 layers), 3D
++    Rc<DxvkImageView>       m_imageViews[3];
++    std::atomic<VkBufferView> m_bufferViewHandle = { VK_NULL_HANDLE };
++    Rc<DxvkBufferView>      m_bufferView;
+     
+     Rc<DxvkSampler> createSampler();
+     
 diff --git a/src/util/log/log.cpp b/src/util/log/log.cpp
 index 2fca3ec..76f7f7f 100644
 --- a/src/util/log/log.cpp

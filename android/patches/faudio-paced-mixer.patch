@@ -1,8 +1,8 @@
 diff --git a/src/FAudio_platform_sdl2.c b/src/FAudio_platform_sdl2.c
-index 39f7480..2d0d752 100644
+index 39f7480..807ca14 100644
 --- a/src/FAudio_platform_sdl2.c
 +++ b/src/FAudio_platform_sdl2.c
-@@ -50,6 +50,166 @@ static void FAudio_INTERNAL_MixCallback(void *userdata, Uint8 *stream, int len)
+@@ -50,6 +50,180 @@ static void FAudio_INTERNAL_MixCallback(void *userdata, Uint8 *stream, int len)
  	}
  }
  
@@ -19,11 +19,12 @@ index 39f7480..2d0d752 100644
 + * the engine is mixed on its own thread, one pass per quantum period, into a
 + * ring buffer the device callback drains.
 + */
-+/* Some devices (Xiaomi) take audio in bigger bursts than a Pixel: a deeper
-+ * ring and an earlier refill keep the device fed, at ~4 quanta of latency.
++/* The ring holds up to PACED_RING_QUANTA passes; the mixer aims to keep
++ * PACED_TARGET_QUANTA in it (the device takes ~3 at a time on some phones)
++ * and only runs passes back to back when less than one is left.
 + */
-+#define PACED_RING_QUANTA 12
-+#define PACED_LOW_QUANTA 4
++#define PACED_RING_QUANTA 24
++#define PACED_TARGET_QUANTA 6
 +
 +typedef struct PacedMixer
 +{
@@ -92,6 +93,8 @@ index 39f7480..2d0d752 100644
 +	Uint64 freq = SDL_GetPerformanceFrequency();
 +	Uint64 period = freq * m->periodMs1000 / 1000000;
 +	Uint64 due = SDL_GetPerformanceCounter();
++	Uint64 step = period;
++	uint32_t target = PACED_TARGET_QUANTA * m->quantumFloats;
 +	uint32_t i, w;
 +
 +	SDL_SetThreadPriority(SDL_THREAD_PRIORITY_HIGH);
@@ -100,7 +103,7 @@ index 39f7480..2d0d752 100644
 +	while (m->running)
 +	{
 +		Uint64 now = SDL_GetPerformanceCounter();
-+		int low = m->fill < PACED_LOW_QUANTA * m->quantumFloats;
++		int low = m->fill < m->quantumFloats;
 +		int room = m->fill + m->quantumFloats <= m->capacity;
 +		if (!room || (!low && now < due))
 +		{
@@ -113,6 +116,18 @@ index 39f7480..2d0d752 100644
 +			SDL_CondWaitTimeout(m->cond, m->lock, waitMs);
 +			continue;
 +		}
++		/* The next pass comes one period later, stretched or shortened by
++		 * up to a quarter as the ring is above or below its target, so the
++		 * passes stay evenly spaced (the engine refills its voices between
++		 * them) while following the device's clock.
++		 */
++		{
++			int64_t error = ((int64_t) m->fill - (int64_t) target) / (int64_t) m->quantumFloats;
++			int64_t pct = 100 + error * 5;
++			if (pct < 75) pct = 75;
++			if (pct > 125) pct = 125;
++			step = period * (Uint64) pct / 100;
++		}
 +		SDL_UnlockMutex(m->lock);
 +
 +		FAudio_zero(scratch, m->quantumFloats * sizeof(float));
@@ -120,12 +135,11 @@ index 39f7480..2d0d752 100644
 +		{
 +			FAudio_INTERNAL_UpdateEngine(m->audio, scratch);
 +		}
-+		/* One pass per period. Behind schedule (after waiting for room in
-+		 * the ring, or a slow pass) the next one still waits half a period
-+		 * rather than running back to back; a low ring is refilled at once.
++		/* Behind schedule (a slow pass) the next one still waits half a
++		 * step rather than running back to back.
 +		 */
-+		due += period;
-+		if (due < now + period / 2) due = now + period / 2;
++		due += step;
++		if (due < now + step / 2) due = now + step / 2;
 +
 +		SDL_LockMutex(m->lock);
 +		w = (m->readPos + m->fill) % m->capacity;
@@ -169,7 +183,7 @@ index 39f7480..2d0d752 100644
  /* Platform Functions */
  
  static void FAudio_INTERNAL_PrioritizeDirectSound()
-@@ -155,6 +315,15 @@ void FAudio_PlatformInit(
+@@ -155,6 +329,15 @@ void FAudio_PlatformInit(
  	want.silence = 0;
  	want.callback = FAudio_INTERNAL_MixCallback;
  	want.userdata = audio;
@@ -185,7 +199,7 @@ index 39f7480..2d0d752 100644
  	if (flags & FAUDIO_1024_QUANTUM)
  	{
  		/* Get the sample count for a 21.33ms frame.
-@@ -215,13 +384,51 @@ iosretry:
+@@ -215,13 +398,51 @@ iosretry:
  	/* SDL_AudioDeviceID is a Uint32, anybody using a 16-bit PC still? */
  	*platformDevice = (void*) ((size_t) device);
  

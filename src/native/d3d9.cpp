@@ -703,11 +703,29 @@ M(IDirect3DDevice9, GetDisplayMode) {
     Return(c, D3D_OK, 3);
 }
 
+bool WaitForWindow(int seconds);  // below, with the surface state
+
 M(IDirect3D9, CreateDevice) {
     D3DPRESENT_PARAMETERS pp = ToHost(Arg(c, 5));
     IDirect3DDevice9* dev = nullptr;
-    HRESULT hr = Host<IDirect3D9>(Arg(c, 0))->CreateDevice(Arg(c, 1), D3DDEVTYPE(Arg(c, 2)), HostHwnd(Arg(c, 3)),
-                                                         Arg(c, 4), &pp, &dev);
+    // The Vulkan surface needs the window on screen: if the player switched to another app during startup, the
+    // device would fail with a lost surface. Wait for the window, and retry a failure that happened while it was gone.
+    HRESULT hr = D3DERR_INVALIDCALL;
+    for (int attempt = 0; attempt < 5; ++attempt) {
+        WaitForWindow(600);
+        D3DPRESENT_PARAMETERS try_pp = pp;
+        hr = Host<IDirect3D9>(Arg(c, 0))->CreateDevice(Arg(c, 1), D3DDEVTYPE(Arg(c, 2)), HostHwnd(Arg(c, 3)),
+                                                     Arg(c, 4), &try_pp, &dev);
+        if (SUCCEEDED(hr)) {
+            pp = try_pp;
+            break;
+        }
+        if (!WaitForWindow(0)) {
+            Log("CreateDevice -> %08x while the window was away, retrying", uint32_t(hr));
+            continue;
+        }
+        break;  // failed with the window on screen: a real driver problem
+    }
     Log("CreateDevice %ux%u fmt %u windowed %u msaa %u/%u interval %u -> %08x", pp.BackBufferWidth,
         pp.BackBufferHeight, pp.BackBufferFormat, pp.Windowed, pp.MultiSampleType, pp.MultiSampleQuality,
         pp.PresentationInterval, uint32_t(hr));
@@ -824,6 +842,18 @@ HRESULT GuardedPresent(F present) {
 }
 
 #ifdef __ANDROID__
+// Waits up to `seconds` for the game's window (surface) to be on screen; true if it is.
+bool WaitForWindow(int seconds) {
+    for (int i = 0; i <= seconds * 10; ++i) {
+        {
+            std::lock_guard<std::mutex> lock(g_present_mutex);
+            if (!g_surface_gone) return true;
+        }
+        if (i < seconds * 10) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    return false;
+}
+
 extern "C" JNIEXPORT void JNICALL Java_com_protore_game_ProtoSurface_nativeSurfaceGone(JNIEnv*, jclass) {
     std::lock_guard<std::mutex> lock(g_present_mutex);
     g_surface_gone = true;

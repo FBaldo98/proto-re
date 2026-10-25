@@ -38,6 +38,7 @@
             android:name="com.protore.game.SetupActivity"
             android:label="Prototype"
             android:exported="true"
+            android:screenOrientation="sensorLandscape"
             android:theme="@android:style/Theme.Material.NoActionBar.Fullscreen">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
