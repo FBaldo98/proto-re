@@ -197,6 +197,12 @@ std::string FailedBefore() {
 
 }  // namespace
 
+void VulkanDriverAbandon() {
+    if (!g_turnip_pending) return;
+    g_turnip_pending = false;
+    unlink(kPending);
+}
+
 void VulkanDriverConfirm() {
     if (!g_turnip_pending) return;
     g_turnip_pending = false;
@@ -260,6 +266,7 @@ namespace native {
 
 void SelectVulkanDriver() {}
 void VulkanDriverConfirm() {}
+void VulkanDriverAbandon() {}
 
 }  // namespace native
 

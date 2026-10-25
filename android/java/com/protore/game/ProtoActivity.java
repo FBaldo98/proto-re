@@ -48,6 +48,13 @@ public class ProtoActivity extends SDLActivity {
         return new ProtoSurface(context);
     }
 
+    /** The engine runs once per process: a new start of the game gets a fresh process. */
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        if (isFinishing()) android.os.Process.killProcess(android.os.Process.myPid());
+    }
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         // The native side loads the bundled Vulkan driver (Turnip, on Adreno) from the extracted libraries.

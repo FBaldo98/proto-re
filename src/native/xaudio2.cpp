@@ -11,6 +11,8 @@
 //   - the voice callback vtable starts with OnVoiceProcessingPassStart(BytesRequired).
 // Guest objects are 16-byte blocks: [0] guest vtable (import thunks), [4] index into g_objects.
 #include <FAudio.h>
+#include <dlfcn.h>
+#include <unistd.h>
 
 #include <chrono>
 #include <cstring>
@@ -82,15 +84,17 @@ void EnsureGuestThread() {
     thread_local bool attached = false;
     if (!attached) {
         AttachThread(1u << 20);
+        PerfHintAddThread(int(gettid()));  // FAudio's mixing thread runs the engine's audio callbacks
         attached = true;
     }
 }
 
 uint32_t Method(uint32_t obj, int index) { return R32(R32(obj) + 4 * uint32_t(index)); }
 
-// Diagnostics (setting audio_stats; by default only when something starved): per 5 s, the mixing passes, the longest gap between passes, the time spent
-// in guest callbacks (on FAudio's mixing thread, so it delays the device), and the passes where the engine's
-// source voice was short of data (BytesRequired > 0: audible as a dropout).
+// Diagnostics (setting audio_stats; by default only when something starved): per 5 s, the mixing passes, the
+// longest gap between passes, the time spent in guest callbacks (on FAudio's mixing thread, so it delays the
+// device), the passes where the engine's source voice was short of data (BytesRequired > 0: audible as a dropout),
+// and on Android the device reads that found FAudio's ring short (underruns: the mixer fell behind the device).
 struct AudioStats {
     using Clock = std::chrono::steady_clock;
     int level = SettingInt("audio_stats", 1);  // 1: only windows where the engine's voice starved, 2: all, 0: off
@@ -113,6 +117,17 @@ struct GuestTimer {
         if (ms > s.max_guest_ms) s.max_guest_ms = ms;
     }
 };
+// Device reads that found FAudio's paced ring short since the last call (android/patches/faudio-paced-mixer.patch).
+uint32_t RingUnderruns() {
+#ifdef __ANDROID__
+    static auto take = reinterpret_cast<uint32_t (*)()>(dlsym(dlopen("libFAudio.so", RTLD_NOW | RTLD_NOLOAD),
+                                                               "FAudio_PacedTakeUnderruns"));
+    return take ? take() : 0;
+#else
+    return 0;
+#endif
+}
+
 void StatsPass() {
     AudioStats& s = Stats();
     if (!s.on) return;
@@ -123,9 +138,10 @@ void StatsPass() {
     }
     s.last_pass = now;
     if (now - s.window >= std::chrono::seconds(5)) {
-        if (s.level >= 2 || s.starved)
-            Log("audio: %u passes, max gap %.1f ms, guest %.1f ms (max %.2f), starved %u, submits %u", s.passes,
-                s.max_gap_ms, s.guest_ms, s.max_guest_ms, s.starved, s.submits);
+        uint32_t underruns = RingUnderruns();
+        if (s.level >= 2 || s.starved || underruns)
+            Log("audio: %u passes, max gap %.1f ms, guest %.1f ms (max %.2f), starved %u, underruns %u, submits %u",
+                s.passes, s.max_gap_ms, s.guest_ms, s.max_guest_ms, s.starved, underruns, s.submits);
         s.window = now;
         s.passes = s.starved = s.submits = 0;
         s.max_gap_ms = s.guest_ms = s.max_guest_ms = 0;

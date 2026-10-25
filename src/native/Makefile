@@ -4,7 +4,7 @@
 #                                libmain.so for the APK (android/build-apk.sh), against the libraries from
 #                                android/build-deps.sh
 PLATFORM ?= linux
-# Generated for the rebased engine: recomp.py --base 0x58000000 --out build/recomp/native (see guest.h)
+# Generated for the rebased engine: recomp.py --functions all --base 0x7c000000 --split 400 --out build/recomp/native (see guest.h)
 RECOMP_DIR ?= ../../build/recomp/native
 DXVK ?= $(HOME)/proto-re-data/deps/dxvk
 COMMON_FLAGS := -DRECOMP_FLAT_MEMORY -fsigned-char -I../recomp

@@ -1,8 +1,8 @@
 diff --git a/src/FAudio_platform_sdl2.c b/src/FAudio_platform_sdl2.c
-index 39f7480..b86a6c2 100644
+index 39f7480..2d0d752 100644
 --- a/src/FAudio_platform_sdl2.c
 +++ b/src/FAudio_platform_sdl2.c
-@@ -50,6 +50,155 @@ static void FAudio_INTERNAL_MixCallback(void *userdata, Uint8 *stream, int len)
+@@ -50,6 +50,166 @@ static void FAudio_INTERNAL_MixCallback(void *userdata, Uint8 *stream, int len)
  	}
  }
  
@@ -40,6 +40,16 @@ index 39f7480..b86a6c2 100644
 +} PacedMixer;
 +
 +static PacedMixer *pacedMixer = NULL;
++
++/* Device reads that found the ring short (each one is audible as a gap);
++ * the port's audio stats read and reset it.
++ */
++static SDL_atomic_t pacedUnderruns;
++
++__attribute__((visibility("default"))) uint32_t FAudio_PacedTakeUnderruns(void)
++{
++	return (uint32_t) SDL_AtomicSet(&pacedUnderruns, 0);
++}
 +
 +/* The engine's audio callbacks run on the mixer thread, and they are heavy for
 + * a phone. Keep the thread off the slowest cores (by cpu_capacity, where the
@@ -151,6 +161,7 @@ index 39f7480..b86a6c2 100644
 +	if (n < want)
 +	{
 +		FAudio_zero(out + n, (want - n) * sizeof(float));
++		SDL_AtomicAdd(&pacedUnderruns, 1);
 +	}
 +}
 +#endif /* __ANDROID__ */
@@ -158,7 +169,7 @@ index 39f7480..b86a6c2 100644
  /* Platform Functions */
  
  static void FAudio_INTERNAL_PrioritizeDirectSound()
-@@ -155,6 +304,15 @@ void FAudio_PlatformInit(
+@@ -155,6 +315,15 @@ void FAudio_PlatformInit(
  	want.silence = 0;
  	want.callback = FAudio_INTERNAL_MixCallback;
  	want.userdata = audio;
@@ -174,7 +185,7 @@ index 39f7480..b86a6c2 100644
  	if (flags & FAUDIO_1024_QUANTUM)
  	{
  		/* Get the sample count for a 21.33ms frame.
-@@ -215,13 +373,51 @@ iosretry:
+@@ -215,13 +384,51 @@ iosretry:
  	/* SDL_AudioDeviceID is a Uint32, anybody using a 16-bit PC still? */
  	*platformDevice = (void*) ((size_t) device);
  

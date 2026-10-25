@@ -169,6 +169,21 @@ std::string HostPath(const char* win_path) {
     return host;
 }
 
+// Read statistics for the perf line: the engine streams music and speech from the archives with synchronous reads
+// on its I/O thread, so slow storage (shared storage goes through FUSE) shows up as audio dropouts.
+struct IoStats {
+    std::atomic<uint64_t> reads{0}, bytes{0}, slow{0}, max_us{0};
+} g_io;
+
+// "N reads, M MiB, S over 50 ms, longest X ms" since the last call.
+std::string TakeIoStats() {
+    char line[128];
+    snprintf(line, sizeof(line), "%llu reads, %llu MiB, %llu over 50 ms, longest %.1f ms",
+             (unsigned long long)g_io.reads.exchange(0), (unsigned long long)(g_io.bytes.exchange(0) >> 20),
+             (unsigned long long)g_io.slow.exchange(0), double(g_io.max_us.exchange(0)) / 1000.0);
+    return line;
+}
+
 namespace {
 
 // ---- waitable objects ----
@@ -634,7 +649,8 @@ K(SetThreadPriority) {
     if (tid) {
         int r = setpriority(PRIO_PROCESS, id_t(tid), nice);
         Log("SetThreadPriority(%d) -> nice %d on tid %d%s", prio, nice, tid, r == 0 ? "" : " (not permitted)");
-        if (prio == 2) PerfHintAddThread(tid);  // THREAD_PRIORITY_HIGHEST: the engine's render thread
+        // THREAD_PRIORITY_HIGHEST: the engine's render thread; TIME_CRITICAL: its audio feeder
+        if (prio == 2 || prio >= 15) PerfHintAddThread(tid);
         if (prio > 0) AvoidLittleCores(tid);
     }
     Return(c, 1, 2);
@@ -867,8 +883,16 @@ K(ReadFile) {
         Return(c, 0, 5);
         return;
     }
+    auto t0 = std::chrono::steady_clock::now();
     ssize_t r = ov ? pread(f->fd, Ptr<void>(buf), n, off_t(R32(ov + 8)) | (off_t(R32(ov + 12)) << 32))
                    : read(f->fd, Ptr<void>(buf), n);
+    uint64_t us = uint64_t(
+        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count());
+    g_io.reads.fetch_add(1, std::memory_order_relaxed);
+    if (r > 0) g_io.bytes.fetch_add(uint64_t(r), std::memory_order_relaxed);
+    if (us > 50000) g_io.slow.fetch_add(1, std::memory_order_relaxed);
+    for (uint64_t m = g_io.max_us.load(); us > m && !g_io.max_us.compare_exchange_weak(m, us);) {
+    }
     if (r < 0) {
         SetLastError(ErrnoToWin(errno));
         Return(c, 0, 5);

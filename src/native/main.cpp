@@ -124,6 +124,9 @@ void InstallCrashHandler() {
 
 }  // namespace
 
+void VulkanDriverAbandon();  // vulkan_driver.cpp
+std::string TakeIoStats();   // kernel32.cpp
+
 void Fatal(const char* fmt, ...) {
     char buf[1024];
     va_list ap;
@@ -131,7 +134,18 @@ void Fatal(const char* fmt, ...) {
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
     Log("FATAL: %s", buf);
+    VulkanDriverAbandon();  // not the driver's fault: the next start keeps trying Turnip
     _exit(70);
+}
+
+// A start that cannot go on: tell the user and end the process. Returning from main would let SDL run main again in
+// the same process, on top of this run's guest memory.
+[[noreturn]] void StartupFailure(const char* what) {
+    Log("startup failed: %s", what);
+    VulkanDriverAbandon();
+    std::string msg = std::string(what) + "\n\nDetails are in proto-native.log.";
+    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Prototype", msg.c_str(), nullptr);
+    _exit(1);
 }
 
 uint32_t HostWindow();  // user32.cpp
@@ -281,6 +295,8 @@ int main(int argc, char** argv) {
     InitD3D9Bridge();
     setenv("DXVK_WSI_DRIVER", "SDL2", 0);  // DXVK native: the HWNDs we pass are SDL windows
     SelectVulkanDriver();  // Adreno: the bundled Turnip driver
+    // audio_driver = aaudio | openslES: SDL's audio backend (FAudio opens SDL audio later); AAudio by default.
+    if (std::string ad = Setting("audio_driver", ""); !ad.empty()) setenv("SDL_AUDIODRIVER", ad.c_str(), 1);
     if (SettingInt("present_stats", 0)) setenv("DXVK_PRESENT_STATS", "1", 0);  // Present timing in the DXVK log
     // dxvk_config = d3d9.presentInterval = 1, d3d9.numBackBuffers = 3  (DXVK options; ',' as ';' starts an ini
     // comment)
@@ -310,7 +326,7 @@ int main(int argc, char** argv) {
     InitClientSize(window_w, window_h);
 
     std::string dll = std::string(g_game_dir) + "/prototypeenginef.dll";
-    if (!LoadImage(dll.c_str(), &g_engine, kEngineBase)) return 1;
+    if (!LoadImage(dll.c_str(), &g_engine, kEngineBase)) StartupFailure("Cannot load prototypeenginef.dll.");
     g_engine_lo = g_engine.base;
     g_engine_hi = g_engine.base + g_engine.size;
 
@@ -323,7 +339,7 @@ int main(int argc, char** argv) {
     Log("DllMain(PROCESS_ATTACH)");
     uint32_t ok = GuestCall(g_engine.entry, {g_engine.base, 1, 0});
     Log("DllMain returned %u", ok);
-    if (!ok) return 1;
+    if (!ok) StartupFailure("The engine's DllMain failed.");
 
     uint32_t hwnd = HostWindow();
     uint32_t params = HeapAlloc(16);
@@ -333,7 +349,7 @@ int main(int argc, char** argv) {
     Log("EngineInitialize");
     uint32_t r = GuestCall(init, {params}) & 0xff;
     Log("EngineInitialize returned %u", r);
-    if (!r) return 1;
+    if (!r) StartupFailure("EngineInitialize failed (game files incomplete or not the Steam build 19788432?).");
 
     InitInput(FindExport(g_engine, "EngineKeyboardService"), FindExport(g_engine, "EngineMouseService"));
     bool focused = true;
@@ -387,7 +403,10 @@ int main(int argc, char** argv) {
             stats_start = now;
         }
         if (now >= next_log) {
-            if (frame) Log("perf: %.1f fps, %.1f ms, %ld MiB resident", g_fps.load(), g_frame_ms.load(), ResidentMiB());
+            if (frame) {
+                Log("perf: %.1f fps, %.1f ms, %ld MiB resident; io: %s", g_fps.load(), g_frame_ms.load(),
+                    ResidentMiB(), TakeIoStats().c_str());
+            }
             next_log = now + std::chrono::seconds(30);
         }
         for (const Tap& t : taps) {

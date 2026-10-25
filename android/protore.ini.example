@@ -14,3 +14,6 @@ texture_skip_min_size = 512
 # Decode DXT (BC1-3) textures on the CPU. Needed on GPUs without BC formats (Mali, PowerVR) and detected
 # automatically; 1/0 forces it on/off.
 #decode_dxt = 1
+
+# Audio backend: aaudio (default) or openslES. Try openslES if the sound stutters while the game runs smoothly.
+#audio_driver = openslES

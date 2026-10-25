@@ -711,9 +711,14 @@ M(IDirect3D9, CreateDevice) {
     Log("CreateDevice %ux%u fmt %u windowed %u msaa %u/%u interval %u -> %08x", pp.BackBufferWidth,
         pp.BackBufferHeight, pp.BackBufferFormat, pp.Windowed, pp.MultiSampleType, pp.MultiSampleQuality,
         pp.PresentationInterval, uint32_t(hr));
-    if (SUCCEEDED(hr) && OverrideModes()) SetClientSize(int(pp.BackBufferWidth), int(pp.BackBufferHeight));
+    // The engine does not check: without a device it crashes on the next call. The DXVK log says why it failed.
+    if (FAILED(hr)) {
+        StartupFailure("The graphics driver could not create the D3D9 device (DXVK on Vulkan). "
+                       "See app_process64_d3d9.log for the reason.");
+    }
+    if (OverrideModes()) SetClientSize(int(pp.BackBufferWidth), int(pp.BackBufferHeight));
     ToGuest(pp, Arg(c, 5));
-    W32(Arg(c, 6), SUCCEEDED(hr) ? Wrap(dev) : 0);
+    W32(Arg(c, 6), Wrap(dev));
     Return(c, uint32_t(hr), 7);
 }
 M(IDirect3DDevice9, GetCreationParameters) {

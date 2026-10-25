@@ -51,15 +51,20 @@ void PerfHintStart(int fps_target) {
     g_target_ns = 1000000000ll / (fps_target > 0 ? fps_target : 60);
     g_tids.push_back(int32_t(gettid()));
     g_session = g_api.createSession(manager, g_tids.data(), g_tids.size(), g_target_ns);
-    Log("perf hint: %s (target %.1f ms)", g_session ? "session" : "unavailable", double(g_target_ns) / 1e6);
+    Log("perf hint: %s (target %.1f ms, %zu threads)", g_session ? "session" : "unavailable",
+        double(g_target_ns) / 1e6, g_tids.size());
 }
 
-// A thread that works on every frame (the engine's render thread): part of the session (Android 14+).
+// A thread that works on every frame (the engine's render thread, the audio threads): part of the session
+// (Android 14+).
+// Threads may register before the session exists (the engine raises its render thread during EngineInitialize,
+// before the main loop starts the session): they are kept and join it then.
 void PerfHintAddThread(int tid) {
     std::lock_guard<std::mutex> lock(g_mutex);
-    if (!g_session || !g_api.setThreads) return;
+    for (int32_t t : g_tids)
+        if (t == tid) return;
     g_tids.push_back(int32_t(tid));
-    g_api.setThreads(g_session, g_tids.data(), g_tids.size());
+    if (g_session && g_api.setThreads) g_api.setThreads(g_session, g_tids.data(), g_tids.size());
 }
 
 void PerfHintTarget(int fps_target) {

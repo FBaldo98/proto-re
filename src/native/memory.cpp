@@ -9,8 +9,11 @@
 // Only the free parts are taken: on Android, ART keeps its Java heap and boot image below 4 GiB (compressed
 // references), so the arena is the set of gaps between the mappings already there.
 #include <sys/mman.h>
+#include <unistd.h>
 
+#include <algorithm>
 #include <cstring>
+#include <string>
 #include <map>
 #include <mutex>
 
@@ -106,6 +109,16 @@ int ClassFor(uint32_t total) {
 
 }  // namespace
 
+// Top of the arena. Qualcomm's own Vulkan driver (KGSL) puts some GPU memory at CPU addresses below 4 GiB (32-bit
+// GPU addresses that must match the CPU mapping); with the arena taking every free page there, its allocations
+// fail and DXVK cannot even create the device. On Adreno the arena stops at 3 GiB, leaving ~1 GiB to the driver;
+// the game is not large-address aware, so it does not miss that space. Setting arena_top (hex) overrides.
+uint64_t ArenaTop() {
+    std::string top = Setting("arena_top", "");
+    if (!top.empty()) return std::min<uint64_t>(strtoull(top.c_str(), nullptr, 16), kArenaHi);
+    return access("/dev/kgsl-3d0", F_OK) == 0 ? 0xc0000000u : kArenaHi;
+}
+
 void InitGuestMemory() {
     // Mappings overlapping the arena, rounded out to the allocation granularity.
     std::map<uint64_t, uint64_t> taken;  // start -> end
@@ -121,7 +134,16 @@ void InitGuestMemory() {
         }
         fclose(maps);
     }
+    // The recompiled code only works with the engine at kEngineBase: say so plainly if something already sits there.
+    for (const auto& t : taken) {
+        if (t.first < uint64_t(kEngineBase) + kEngineReserve && t.second > kEngineBase) {
+            Fatal("the engine's address range %08x-%08x is in use (%08llx-%08llx, see the memory lines above)",
+                  kEngineBase, kEngineBase + kEngineReserve, (unsigned long long)t.first,
+                  (unsigned long long)t.second);
+        }
+    }
     taken[kEngineBase] = uint64_t(kEngineBase) + kEngineReserve;
+    const uint64_t top = ArenaTop();
     uint64_t cursor = kArenaLo, total = 0;
     auto reserve = [&](uint64_t lo, uint64_t hi) {
         if (hi <= lo) return;
@@ -136,12 +158,15 @@ void InitGuestMemory() {
         total += hi - lo;
     };
     for (const auto& t : taken) {
-        if (t.first > cursor) reserve(cursor, t.first);
+        if (t.first > cursor) reserve(cursor, std::min(t.first, top));
         if (t.second > cursor) cursor = t.second;
     }
-    reserve(cursor, kArenaHi);
+    reserve(cursor, top);
     if (total < (512u << 20)) Fatal("guest arena too small: %llu MiB free below 4 GiB", (unsigned long long)(total >> 20));
-    if (!taken.empty()) Log("memory: arena %llu MiB in %zu ranges", (unsigned long long)(total >> 20), g_free.size());
+    if (!taken.empty()) {
+        Log("memory: arena %llu MiB in %zu ranges, top %08llx", (unsigned long long)(total >> 20), g_free.size(),
+            (unsigned long long)top);
+    }
     InitClasses();
 }
 

@@ -1486,7 +1486,7 @@ def main():
     ap.add_argument("--out", required=True, help="output .c file, or a directory with --split")
     ap.add_argument("--split", type=int, default=0, help="functions per file (writes part_NNNN.c + table.c)")
     ap.add_argument("--base", type=lambda v: int(v, 0), default=ORIG_BASE,
-                    help="engine load address (native host: 0x58000000)")
+                    help="engine load address (native host: 0x7c000000, guest.h kEngineBase)")
     ap.add_argument("--no-localize", action="store_true", help="keep general registers in the context")
     ap.add_argument("--no-dirty", action="store_true", help="spill all localized state at every call")
     ap.add_argument("--no-native", action="store_true", help="recompile NATIVE_OVERRIDES too (difftests)")

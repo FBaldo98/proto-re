@@ -14,6 +14,8 @@ namespace native {
 
 // ---- logging ----
 void Log(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+// A start that cannot go on: logs, shows `what` to the user and ends the process (main.cpp).
+[[noreturn]] void StartupFailure(const char* what);
 [[noreturn]] void Fatal(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 
 // ---- guest memory (memory.cpp) ----
@@ -99,10 +101,12 @@ struct LoadedImage {
 // Maps a PE32 image at `load_base` (0: its preferred base; otherwise base relocations are applied), resolving
 // imports to thunks. Returns false when the file is unusable.
 bool LoadImage(const char* path, LoadedImage* out, uint32_t load_base = 0);
-// Where the native host loads the engine. Not its preferred 0x10000000: on Android ART's heap lives there. The
-// recompiled code must be generated for the same address (recomp.py --base 0x58000000); below 2 GiB because the
+// Where the native host loads the engine. Not its preferred 0x10000000: on Android ART's heap lives there, and its
+// size varies (main space 512 MiB or 1 GiB from 0x02000000, then 512 MiB of large object space, reaching
+// 0x62000000), so the engine sits above ART's boot image and non-moving space (which end near 0x77000000). The
+// recompiled code must be generated for the same address (recomp.py --base 0x7c000000); below 2 GiB because the
 // game is not large-address aware.
-constexpr uint32_t kEngineBase = 0x58000000u;
+constexpr uint32_t kEngineBase = 0x7c000000u;
 constexpr uint32_t kEngineReserve = 0x02000000u;  // address space kept out of the arena for the image
 uint32_t FindExport(const LoadedImage& image, const char* name);
 
