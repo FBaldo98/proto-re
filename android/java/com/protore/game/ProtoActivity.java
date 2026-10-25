@@ -48,11 +48,15 @@ public class ProtoActivity extends SDLActivity {
         return new ProtoSurface(context);
     }
 
-    /** The engine runs once per process: a new start of the game gets a fresh process. */
+    /**
+     * The engine runs once per process: a new start of the game gets a fresh process. SDL's onDestroy waits on the UI
+     * thread for the game thread to return, which the engine's shutdown can make long enough for an ANR, so a
+     * finishing activity ends the process before that.
+     */
     @Override
     protected void onDestroy() {
-        super.onDestroy();
         if (isFinishing()) android.os.Process.killProcess(android.os.Process.myPid());
+        super.onDestroy();
     }
 
     @Override

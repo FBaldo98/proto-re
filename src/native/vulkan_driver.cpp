@@ -157,7 +157,7 @@ bool TurnipWorksInChild(const std::string& dir) {
     }
     if (pid == 0) {
         close(fds[0]);
-        alarm(10);
+        alarm(5);
         std::string device, report;
         bool ok = LoadTurnip(dir, device, report) != nullptr;
         (void)!write(fds[1], report.data(), report.size());
@@ -166,7 +166,7 @@ bool TurnipWorksInChild(const std::string& dir) {
     close(fds[1]);
     std::string report;
     char buf[256];
-    for (int waited = 0; waited < 8000;) {
+    for (int waited = 0; waited < 4000;) {  // a working driver answers in well under a second
         pollfd p = {fds[0], POLLIN, 0};
         int n = poll(&p, 1, 100);
         waited += 100;

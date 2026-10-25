@@ -438,7 +438,14 @@ int main(int argc, char** argv) {
         bool quit = false;
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
-            if (e.type == SDL_QUIT) {
+            if (e.type == SDL_QUIT || e.type == SDL_APP_TERMINATING) {
+#ifdef __ANDROID__
+                // Android closes the activity and waits for this thread on its UI thread: the engine's shutdown
+                // (EngineTerminate waits for its threads) took long enough for "isn't responding". The game saves
+                // at its checkpoints, so there is nothing to lose by ending the process here.
+                Log("quit");
+                _exit(0);
+#endif
                 quit = true;
             } else if (e.type == SDL_WINDOWEVENT) {
                 if (e.window.event == SDL_WINDOWEVENT_FOCUS_GAINED) focused = true;
