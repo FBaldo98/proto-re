@@ -32,6 +32,10 @@ import java.io.OutputStream;
  * or in /sdcard/Prototype, which needs "all files access" (storage permission before Android 11).
  */
 public class SetupActivity extends Activity {
+    /** Shown on the setup screen and in the in-game settings panel. */
+    static final String CREDIT = "Android port by VinTeRuS";
+    static final String CREDIT_URL = "github.com/VinTeRuS/proto-re";
+
     private static final String DLL = "prototypeenginef.dll";
     private static final int REQUEST_STORAGE = 1;
 
@@ -181,6 +185,10 @@ public class SetupActivity extends Activity {
         if (!hasSharedAccess()) row.addView(button("Allow file access", this::requestAccess));
         row.addView(button("Exit", this::finish));
         col.addView(row);
+        TextView credit = text(CREDIT + " \u00b7 " + CREDIT_URL, 12, false);
+        credit.setTextColor(Color.rgb(150, 150, 150));
+        credit.setPadding(0, dp(24), 0, 0);
+        col.addView(credit);
 
         ScrollView scroll = new ScrollView(this);
         scroll.setBackgroundColor(Color.rgb(18, 18, 18));

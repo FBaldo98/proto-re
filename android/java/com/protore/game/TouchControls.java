@@ -871,6 +871,14 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
         text.setTextSize(20 * density);
         text.setColor(RED);
         c.drawText("SETTINGS", panel.centerX(), panel.top + 36 * density, text);
+        // Credit, in the corners beside the title.
+        text.setTextSize(11 * density);
+        text.setColor(0xff9a8a88);
+        text.setTextAlign(Paint.Align.LEFT);
+        c.drawText(SetupActivity.CREDIT, panel.left + pad, panel.top + 34 * density, text);
+        text.setTextAlign(Paint.Align.RIGHT);
+        c.drawText(SetupActivity.CREDIT_URL, panel.right - pad, panel.top + 34 * density, text);
+        text.setTextAlign(Paint.Align.CENTER);
         // two columns of settings
         int rows = (settings.length + 1) / 2;
         float rowH = (panel.height() - 116 * density) / rows;
