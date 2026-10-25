@@ -6,7 +6,7 @@ Native Android port of Prototype (2009). Not an emulator and not Wine: `prototyp
 recompiled from x86 to C, built for arm64 and run on top of my own Win32/D3D9 layer (SDL2, DXVK, FAudio).
 The APK has no game data in it, you copy the files from your own copy of the game.
 
-Roadmap (Russian): [ROADMAP.md](ROADMAP.md). Engine notes: [re/subsystems.md](re/subsystems.md).
+Roadmap (Russian): [ROADMAP.md](ROADMAP.md).
 
 ## Status
 
@@ -85,103 +85,35 @@ manager that can open Android/data). Attach these files as they are, don't paste
 Also write the phone model, the chip (for example Snapdragon 8 Gen 2 / Dimensity 9000 / Exynos 1380), the Android
 version, the version of the APK and when the problem happens (at start, in the menu, in the game).
 
-## How it works
-
-`tools/recomp/recomp.py` (capstone) turns each engine function into `void f_<va>(Ctx*)` with explicit CPU
-state: flags with liveness analysis, x87 and SSE, jump tables, setjmp/longjmp, atomics. All 73,595
-functions go through, no unsupported instructions.
-
-`src/native` is the runtime: PE loader, the Windows imports the engine uses, D3D9 forwarded to DXVK,
-XAudio2 to FAudio, input through SDL2. A few hot paths (skinning, audio) are written by hand.
-
-Some functions are also reconstructed by hand in C++ (re3/reVC style) and checked against the original with
-in-process diff tests under Wine (`src/host`, a `binkw32.dll` proxy). About 230 so far, no mismatches.
-
-| path | |
-|---|---|
-| `src/native/` | runtime: loader, Win32, D3D9 bridge, audio, input, ADPF, Turnip |
-| `src/recomp/` | headers for the recompiled code, x86 bridge |
-| `src/host/` | Wine proxy: hooks, diff tests, probes |
-| `src/core/`, `src/math/` | hand-reconstructed engine code |
-| `src/tests/` | diff tests |
-| `android/` | Java (activity, touch controls), build scripts, DXVK patches |
-| `tools/recomp/` | recompiler, `bisect.sh` |
-| `tools/` | RCF/P3D tools, D3D9 bridge generator, misc |
-| `tools/ghidra/` | headless Ghidra scripts |
-| `re/` | notes, issues, function list |
-
 ## Building
 
-Linux. Needs the Android NDK, JDK, SDK build-tools, python3 with `capstone` and `pefile`, cmake, ninja,
-meson >= 1.4. Turnip also needs mako, pyyaml, bison, flex, glslangValidator. For the Wine side:
-`mingw-w64-gcc` (i686), wine, dxvk. `PROTORE_ENGINE` points to the original DLL
-(default `~/Downloads/Prototype (2009)/Prototype/prototypeenginef.dll`).
-
-APK:
+Linux with the Android NDK, JDK, SDK build-tools, python3 with `capstone` and `pefile`, cmake, ninja and
+meson >= 1.4 (Turnip also needs mako, pyyaml, bison, flex, glslangValidator). `PROTORE_ENGINE` points to the
+original DLL (default `~/Downloads/Prototype (2009)/Prototype/prototypeenginef.dll`).
 
 ```sh
 android/build-deps.sh arm64-v8a ~/proto-re-data/android-deps-src ~/proto-re-data/android-deps/arm64-v8a
 android/build-turnip.sh ~/proto-re-data/android-deps-src ~/proto-re-data/android-turnip
 python3 -I tools/recomp/data_entries.py
-python3 -I tools/recomp/recomp.py --functions all --out build/recomp/all --split 400
+python3 -I tools/recomp/recomp.py --functions all --base 0x7c000000 --split 400 --out build/recomp/native
 tools/cool_make.sh -C src/native PLATFORM=android ABI=arm64-v8a
-# optional, for ARMv8.0 phones (Cortex-A53/A73, Snapdragon 6xx and older); the APK picks the right one at launch
+# for ARMv8.0 phones (Snapdragon 6xx and older); the APK picks the right build at launch
 tools/cool_make.sh -C src/native PLATFORM=android ABI=arm64-v8a ARM_ARCH=armv8-a OUT=../../build/android/arm64-v8a-v80
 android/build-apk.sh arm64-v8a
-adb install -r build/apk/prototype.apk
 ```
 
-The deps (SDL2, FAudio, DXVK, Turnip) are also built by GitHub Actions. `cool_make.sh` is make on all cores
-that pauses at 93°C, my laptop shut down once without it.
-
-Desktop build (DXVK 2.5.3 with `-Denable_d3d9=true -Ddxvk_native_wsi=sdl2` and FAudio in `~/proto-re-data/deps`):
-
-```sh
-tools/cool_make.sh -C src/native
-cd ~/proto-re-data/native_run && PROTORE_WINDOWED=1 ~/proto-re/build/native/proto-native ~/proto-re-data/game
-```
-
-Wine proxy (game folder = symlinks to the install, original `binkw32.dll` renamed to `binkw32_orig.dll`):
-
-```sh
-make -C src/host -j4
-cp build/host/binkw32.dll ~/proto-re-data/game/
-cd ~/proto-re-data/game && wine prototypef.exe
-```
-
-<details>
-<summary>debug env vars</summary>
-
-| var | |
-|---|---|
-| `PROTORE_NOHOOKS=1` | original engine through the proxy |
-| `PROTORE_NULLPATCH=1` | write the original bytes back over the hooks |
-| `PROTORE_ONLY=a,b` / `PROTORE_SKIP=a,b` | filter hooks by name prefix |
-| `PROTORE_DIFFTEST=1` / `=exit` | run diff tests (and exit) |
-| `PROTORE_DIFFTEST_RECOMP=1` | recompiled vs original diff tests |
-| `PROTORE_RECOMP=1` / `=all` | test set / whole engine recompiled |
-| `PROTORE_RECOMP_RANGE=lo-hi` | recompile only this address range |
-| `PROTORE_PROBE=openbykey\|watchdir` | file system probes |
-| `PROTORE_TRACE_FPU=1` | trace FPU dependent CRT calls |
-| `PROTORE_WINDOWED=1` | desktop: windowed |
-| `PROTORE_SHOT=300,2000` | dump these frames to `shot_<n>.ppm` |
-| `PROTORE_INPUT=2100:Return,...` | press a key at a frame |
-| `PROTORE_TRACE_FILES=1` | log file opens |
-
-Finding a function that breaks the game: `MIN_FRAMES=64 RUN_SECONDS=70 [START_LO=N] tools/recomp/bisect.sh`
-
-</details>
+`cool_make.sh` is make on all cores that pauses at 93°C.
 
 ## Testing
 
 Thanks to Copyright-1 for testing on Adreno.
 
-## Notes
+## Credits
 
-Russian is ElArchibald's fan translation, xdelta patches for 8 RCF archives (subtitles, text, HUD, fonts).
-There's no Russian voice-over for the PC version.
+If you share this port, publish a build of it, or use its code, **credit the author and link this repository:**
+https://github.com/VinTeRuS/proto-re
 
-Game files, the original DLL, decompiled code and the generated C are not in the repo and never will be.
-No DRM bypass. Bring your own copy of the game, I don't share APKs or game files.
+Russian text: ElArchibald's fan translation.
 
-Prototype belongs to Activision / Radical Entertainment.
+The repository has no game files, original DLL or code generated from it, and the port does not bypass any DRM:
+you need your own copy of the game. Prototype belongs to Activision / Radical Entertainment.

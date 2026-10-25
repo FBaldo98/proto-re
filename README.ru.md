@@ -6,7 +6,7 @@
 перекомпилирован из x86 в C, собран под arm64 и работает поверх своей прослойки Win32/D3D9 (SDL2, DXVK, FAudio).
 В APK нет файлов игры, их надо скопировать из своей копии.
 
-План: [ROADMAP.md](ROADMAP.md). Заметки по движку: [re/subsystems.md](re/subsystems.md).
+План: [ROADMAP.md](ROADMAP.md).
 
 ## Что есть
 
@@ -86,103 +86,35 @@ Vulkan 1.3). На Adreno 8xx сразу драйвер телефона. Что�
 И напишите модель телефона, процессор (например Snapdragon 8 Gen 2 / Dimensity 9000 / Exynos 1380), версию Android,
 версию APK и когда проблема появляется (при запуске, в меню, в игре).
 
-## Как устроено
-
-`tools/recomp/recomp.py` (capstone) превращает каждую функцию движка в `void f_<va>(Ctx*)` с явным
-состоянием процессора: флаги с анализом живости, x87 и SSE, таблицы переходов, setjmp/longjmp, атомики.
-Проходят все 73 595 функций, неподдерживаемых инструкций нет.
-
-`src/native` это рантайм: загрузчик PE, нужные движку импорты Windows, D3D9 через DXVK, XAudio2 через FAudio,
-ввод через SDL2. Пара горячих мест (скиннинг, звук) написана руками.
-
-Часть функций переписана вручную на C++ (как в re3/reVC) и сверяется с оригиналом дифтестами внутри процесса
-под Wine (`src/host`, прокси `binkw32.dll`). Пока около 230 функций, расхождений нет.
-
-| путь | |
-|---|---|
-| `src/native/` | рантайм: загрузчик, Win32, мост D3D9, звук, ввод, ADPF, Turnip |
-| `src/recomp/` | заголовки для перекомпилированного кода, мост x86 |
-| `src/host/` | прокси для Wine: хуки, дифтесты, пробы |
-| `src/core/`, `src/math/` | движок, восстановленный вручную |
-| `src/tests/` | дифтесты |
-| `android/` | Java (activity, сенсорное управление), скрипты сборки, патчи DXVK |
-| `tools/recomp/` | перекомпилятор, `bisect.sh` |
-| `tools/` | утилиты для RCF/P3D, генератор моста D3D9 и прочее |
-| `tools/ghidra/` | скрипты для headless Ghidra |
-| `re/` | заметки, проблемы, список функций |
-
 ## Сборка
 
-Linux. Нужны Android NDK, JDK, SDK build-tools, python3 с `capstone` и `pefile`, cmake, ninja, meson >= 1.4.
-Для Turnip ещё mako, pyyaml, bison, flex, glslangValidator. Для Wine: `mingw-w64-gcc` (i686), wine, dxvk.
-`PROTORE_ENGINE` указывает на оригинальный DLL
+Linux, Android NDK, JDK, SDK build-tools, python3 с `capstone` и `pefile`, cmake, ninja и meson >= 1.4 (для Turnip
+ещё mako, pyyaml, bison, flex, glslangValidator). `PROTORE_ENGINE` указывает на оригинальный DLL
 (по умолчанию `~/Downloads/Prototype (2009)/Prototype/prototypeenginef.dll`).
-
-APK:
 
 ```sh
 android/build-deps.sh arm64-v8a ~/proto-re-data/android-deps-src ~/proto-re-data/android-deps/arm64-v8a
 android/build-turnip.sh ~/proto-re-data/android-deps-src ~/proto-re-data/android-turnip
 python3 -I tools/recomp/data_entries.py
-python3 -I tools/recomp/recomp.py --functions all --out build/recomp/all --split 400
+python3 -I tools/recomp/recomp.py --functions all --base 0x7c000000 --split 400 --out build/recomp/native
 tools/cool_make.sh -C src/native PLATFORM=android ABI=arm64-v8a
-# по желанию, для телефонов на ARMv8.0 (Cortex-A53/A73, Snapdragon 6xx и старше); APK сам выбирает нужную при запуске
+# для телефонов на ARMv8.0 (Snapdragon 6xx и старше); APK сам выбирает нужную сборку при запуске
 tools/cool_make.sh -C src/native PLATFORM=android ABI=arm64-v8a ARM_ARCH=armv8-a OUT=../../build/android/arm64-v8a-v80
 android/build-apk.sh arm64-v8a
-adb install -r build/apk/prototype.apk
 ```
 
-Зависимости (SDL2, FAudio, DXVK, Turnip) ещё собирает GitHub Actions. `cool_make.sh` это make на всех ядрах,
-который ставит сборку на паузу при 93°C: без него ноут один раз выключился.
-
-Сборка для ПК (DXVK 2.5.3 с `-Denable_d3d9=true -Ddxvk_native_wsi=sdl2` и FAudio в `~/proto-re-data/deps`):
-
-```sh
-tools/cool_make.sh -C src/native
-cd ~/proto-re-data/native_run && PROTORE_WINDOWED=1 ~/proto-re/build/native/proto-native ~/proto-re-data/game
-```
-
-Прокси под Wine (папка игры из симлинков на установку, оригинальный `binkw32.dll` переименован в `binkw32_orig.dll`):
-
-```sh
-make -C src/host -j4
-cp build/host/binkw32.dll ~/proto-re-data/game/
-cd ~/proto-re-data/game && wine prototypef.exe
-```
-
-<details>
-<summary>переменные для отладки</summary>
-
-| переменная | |
-|---|---|
-| `PROTORE_NOHOOKS=1` | оригинальный движок через прокси |
-| `PROTORE_NULLPATCH=1` | вернуть исходные байты на место хуков |
-| `PROTORE_ONLY=a,b` / `PROTORE_SKIP=a,b` | фильтр хуков по префиксу имени |
-| `PROTORE_DIFFTEST=1` / `=exit` | прогнать дифтесты (и выйти) |
-| `PROTORE_DIFFTEST_RECOMP=1` | дифтесты перекомпилированного кода против оригинала |
-| `PROTORE_RECOMP=1` / `=all` | тестовый набор / весь движок перекомпилирован |
-| `PROTORE_RECOMP_RANGE=lo-hi` | перекомпилировать только этот диапазон адресов |
-| `PROTORE_PROBE=openbykey\|watchdir` | пробы файловой системы |
-| `PROTORE_TRACE_FPU=1` | трассировка вызовов CRT, зависящих от FPU |
-| `PROTORE_WINDOWED=1` | ПК: в окне |
-| `PROTORE_SHOT=300,2000` | сохранить эти кадры в `shot_<n>.ppm` |
-| `PROTORE_INPUT=2100:Return,...` | нажать клавишу на нужном кадре |
-| `PROTORE_TRACE_FILES=1` | логировать открытие файлов |
-
-Поиск функции, которая ломает игру: `MIN_FRAMES=64 RUN_SECONDS=70 [START_LO=N] tools/recomp/bisect.sh`
-
-</details>
+`cool_make.sh` это make на всех ядрах, который ставит сборку на паузу при 93°C.
 
 ## Тестирование
 
 Спасибо Copyright-1 за тесты на Adreno.
 
-## Прочее
+## Авторство
 
-Русский это фанатский перевод от ElArchibald: xdelta-патчи для 8 архивов RCF (субтитры, текст, HUD, шрифты).
-Русской озвучки для PC-версии нет.
+Если вы делитесь этим портом, выкладываете его сборки или используете его код, **обязательно укажите автора и дайте
+ссылку на этот репозиторий:** https://github.com/VinTeRuS/proto-re
 
-Файлов игры, оригинального DLL, декомпилированного и сгенерированного кода в репозитории нет и не будет.
-DRM не обходится. Игра нужна своя, APK и файлы игры я не раздаю.
+Русский текст: фанатский перевод от ElArchibald.
 
-Prototype принадлежит Activision / Radical Entertainment.
+В репозитории нет файлов игры, оригинального DLL и сгенерированного из него кода, DRM порт не обходит: нужна своя
+копия игры. Prototype принадлежит Activision / Radical Entertainment.
