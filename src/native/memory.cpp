@@ -4,10 +4,10 @@
 //   kEngineBase (guest.h) engine image, rebased; kept out of the arena
 //   0x12000000 .. 0xf0000000  arena: VirtualAlloc pages, guest heap, stacks, TEBs
 //
-// The arena is mapped read/write with MAP_NORESERVE once; the kernel commits pages on first touch, which matches
-// VirtualAlloc's reserve/commit closely enough for the engine (it never relies on access faults in reserved pages).
-// Only the free parts are taken: on Android, ART keeps its Java heap and boot image below 4 GiB (compressed
-// references), so the arena is the set of gaps between the mappings already there.
+// The arena is the set of gaps between the mappings already there at startup (on Android, ART keeps its Java heap
+// and boot image below 4 GiB for compressed references). Guest allocations map their pages read/write with
+// MAP_NORESERVE when they are made (the kernel commits pages on first touch, close enough to VirtualAlloc's
+// reserve/commit) and unmap them when freed, leaving the rest of the low 4 GiB to others (Qualcomm's GPU driver).
 #include <sys/mman.h>
 #include <unistd.h>
 
@@ -33,6 +33,47 @@ std::map<uint32_t, uint32_t> g_used;  // start -> size, allocated page ranges
 
 uint32_t RoundUp(uint32_t v, uint32_t a) { return (v + a - 1) & ~(a - 1); }
 
+// Maps [a, a + size) for the guest unless something else got there first (MAP_FIXED_NOREPLACE).
+bool MapGuest(uint32_t a, uint32_t size) {
+    void* p = mmap(reinterpret_cast<void*>(uintptr_t(a)), size, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE, -1, 0);
+    if (p == reinterpret_cast<void*>(uintptr_t(a))) return true;
+    if (p != MAP_FAILED) munmap(p, size);  // an old kernel took the address as a hint only
+    return false;
+}
+
+// Removes [lo, hi) from the candidate ranges.
+void Withdraw(uint64_t lo, uint64_t hi) {
+    for (auto f = g_free.begin(); f != g_free.end();) {
+        uint64_t fs = f->first, fe = fs + f->second;
+        if (fe <= lo || fs >= hi) {
+            ++f;
+            continue;
+        }
+        f = g_free.erase(f);
+        if (fs < lo) g_free[uint32_t(fs)] = uint32_t(lo - fs);
+        if (fe > hi) g_free[uint32_t(hi)] = uint32_t(fe - hi);
+    }
+}
+
+// Someone else (the GPU driver, ART) mapped into a candidate range: drop every foreign mapping from the candidates.
+void WithdrawForeignMappings() {
+    FILE* maps = fopen("/proc/self/maps", "r");
+    if (!maps) return;
+    char line[512];
+    while (fgets(line, sizeof(line), maps)) {
+        unsigned long long lo, hi;
+        if (sscanf(line, "%llx-%llx", &lo, &hi) != 2 || lo >= 0x100000000ull) continue;
+        auto u = g_used.upper_bound(uint32_t(lo));
+        if (u != g_used.begin() && std::prev(u)->first + uint64_t(std::prev(u)->second) > lo) continue;  // ours
+        Withdraw(lo & ~uint64_t(kPage - 1), (hi + kPage - 1) & ~uint64_t(kPage - 1));
+    }
+    fclose(maps);
+}
+
+// The arena is address space below 4 GiB that the guest may use (g_free), mapped only when the guest allocates
+// it. Reserving it all up front left nothing below 3 GiB for Qualcomm's driver, which maps GPU memory at matching
+// CPU and GPU addresses there (KGSL SVM): DXVK's first host-visible allocation failed.
 uint32_t PageAllocLocked(uint32_t size, uint32_t at) {
     size = RoundUp(size ? size : 1, kPage);
     if (at) {
@@ -54,6 +95,10 @@ uint32_t PageAllocLocked(uint32_t size, uint32_t at) {
         if (at < fs || uint64_t(at) + size > uint64_t(fs) + fsz) {
             return 0;
         }
+        if (!MapGuest(at, size)) {
+            WithdrawForeignMappings();
+            return 0;
+        }
         g_free.erase(f);
         if (at > fs) {
             g_free[fs] = at - fs;
@@ -64,16 +109,21 @@ uint32_t PageAllocLocked(uint32_t size, uint32_t at) {
         g_used[at] = size;
         return at;
     }
-    for (auto f = g_free.begin(); f != g_free.end(); ++f) {
-        if (f->second >= size) {
-            uint32_t a = f->first, rest = f->second - size;
-            g_free.erase(f);
-            if (rest) {
-                g_free[a + size] = rest;
-            }
-            g_used[a] = size;
-            return a;
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        auto f = g_free.begin();
+        while (f != g_free.end() && f->second < size) ++f;
+        if (f == g_free.end()) return 0;
+        uint32_t a = f->first, rest = f->second - size;
+        if (!MapGuest(a, size)) {
+            WithdrawForeignMappings();
+            continue;
         }
+        g_free.erase(f);
+        if (rest) {
+            g_free[a + size] = rest;
+        }
+        g_used[a] = size;
+        return a;
     }
     return 0;
 }
@@ -109,14 +159,11 @@ int ClassFor(uint32_t total) {
 
 }  // namespace
 
-// Top of the arena. Qualcomm's own Vulkan driver (KGSL) puts some GPU memory at CPU addresses below 4 GiB (32-bit
-// GPU addresses that must match the CPU mapping); with the arena taking every free page there, its allocations
-// fail and DXVK cannot even create the device. On Adreno the arena stops at 3 GiB, leaving ~1 GiB to the driver;
-// the game is not large-address aware, so it does not miss that space. Setting arena_top (hex) overrides.
+// Top of the arena; setting arena_top (hex) lowers it.
 uint64_t ArenaTop() {
     std::string top = Setting("arena_top", "");
     if (!top.empty()) return std::min<uint64_t>(strtoull(top.c_str(), nullptr, 16), kArenaHi);
-    return access("/dev/kgsl-3d0", F_OK) == 0 ? 0xc0000000u : kArenaHi;
+    return kArenaHi;
 }
 
 void InitGuestMemory() {
@@ -145,15 +192,8 @@ void InitGuestMemory() {
     taken[kEngineBase] = uint64_t(kEngineBase) + kEngineReserve;
     const uint64_t top = ArenaTop();
     uint64_t cursor = kArenaLo, total = 0;
-    auto reserve = [&](uint64_t lo, uint64_t hi) {
+    auto reserve = [&](uint64_t lo, uint64_t hi) {  // candidates only: mapped on allocation
         if (hi <= lo) return;
-        void* p = mmap(reinterpret_cast<void*>(uintptr_t(lo)), size_t(hi - lo), PROT_READ | PROT_WRITE,
-                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE, -1, 0);
-        if (p != reinterpret_cast<void*>(uintptr_t(lo))) {
-            if (p != MAP_FAILED) munmap(p, size_t(hi - lo));
-            Log("memory: cannot reserve %08llx-%08llx", (unsigned long long)lo, (unsigned long long)hi);
-            return;
-        }
         g_free[uint32_t(lo)] = uint32_t(hi - lo);
         total += hi - lo;
     };
@@ -175,6 +215,23 @@ uint32_t PageAlloc(uint32_t size, uint32_t at) {
     return PageAllocLocked(size, at);
 }
 
+// Address space the guest holds (reserved or committed) and the highest address in use, for the perf line.
+std::string ArenaUsage() {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    uint64_t used = 0;
+    uint32_t top = 0;
+    for (const auto& u : g_used) {
+        used += u.second;
+        top = std::max(top, u.first + u.second);
+    }
+    static uint64_t peak = 0;
+    peak = std::max(peak, used);
+    char line[96];
+    snprintf(line, sizeof(line), "%llu MiB (peak %llu), up to %08x", (unsigned long long)(used >> 20),
+             (unsigned long long)(peak >> 20), top);
+    return line;
+}
+
 void PageFree(uint32_t addr) {
     std::lock_guard<std::mutex> lock(g_mutex);
     auto u = g_used.find(addr);
@@ -183,7 +240,7 @@ void PageFree(uint32_t addr) {
     }
     uint32_t a = u->first, size = u->second;
     g_used.erase(u);
-    madvise(Ptr<void>(a), size, MADV_DONTNEED);  // zero pages on reuse, as VirtualAlloc guarantees
+    munmap(Ptr<void>(a), size);  // back to the address space pool (zero pages on reuse, as VirtualAlloc guarantees)
     auto next = g_free.find(a + size);
     if (next != g_free.end()) {
         size += next->second;

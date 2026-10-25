@@ -145,6 +145,7 @@ void InstallCrashHandler() {
 
 void VulkanDriverAbandon();  // vulkan_driver.cpp
 std::string TakeIoStats();   // kernel32.cpp
+std::string ArenaUsage();    // memory.cpp
 
 void Fatal(const char* fmt, ...) {
     char buf[1024];
@@ -423,8 +424,8 @@ int main(int argc, char** argv) {
         }
         if (now >= next_log) {
             if (frame) {
-                Log("perf: %.1f fps, %.1f ms, %ld MiB resident; io: %s", g_fps.load(), g_frame_ms.load(),
-                    ResidentMiB(), TakeIoStats().c_str());
+                Log("perf: %.1f fps, %.1f ms, %ld MiB resident; arena %s; io: %s", g_fps.load(), g_frame_ms.load(),
+                    ResidentMiB(), ArenaUsage().c_str(), TakeIoStats().c_str());
             }
             next_log = now + std::chrono::seconds(30);
         }
