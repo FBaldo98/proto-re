@@ -3,7 +3,8 @@
  * Every recompiled function has the signature `void f_<va>(Ctx*)` and works on an explicit guest CPU state.
  * Guest memory is addressed with 32-bit guest addresses relative to RecompMemoryBase: 0 when running inside the
  * original 32-bit process (prototype, hooked into the engine). The native host (src/native) builds with
- * RECOMP_FLAT_MEMORY and keeps guest memory in the low 4 GiB of its own address space. */
+ * RECOMP_FLAT_MEMORY and keeps guest memory in a 4 GiB window of its own address space at the compile-time constant
+ * RECOMP_GUEST_BASE. */
 #ifndef PROTORE_RECOMP_RUNTIME_H
 #define PROTORE_RECOMP_RUNTIME_H
 
@@ -59,8 +60,12 @@ static inline int RecompDirect(uint32_t target) {
 
 /* ---- memory ---- */
 #ifdef RECOMP_FLAT_MEMORY
-/* Native host: guest memory occupies the low 4 GiB of the host address space, so guest addresses are pointers. */
-static inline uint8_t* G(uint32_t a) { return (uint8_t*)(uintptr_t)a; }
+/* Native host: guest memory is a 4 GiB window at RECOMP_GUEST_BASE (a constant, so the addition folds into the
+ * addressing); 0 puts it in the low 4 GiB, where Android's Java heap and Qualcomm's GPU driver also live. */
+#ifndef RECOMP_GUEST_BASE
+#define RECOMP_GUEST_BASE 0
+#endif
+static inline uint8_t* G(uint32_t a) { return (uint8_t*)(uintptr_t)((uint64_t)RECOMP_GUEST_BASE + a); }
 #else
 static inline uint8_t* G(uint32_t a) { return RecompMemoryBase + a; }
 #endif

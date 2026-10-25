@@ -147,7 +147,7 @@ void StatsPass() {
         s.max_gap_ms = s.guest_ms = s.max_guest_ms = 0;
     }
 }
-uint32_t GuestPtr(void* p) { return uint32_t(reinterpret_cast<uintptr_t>(p)); }
+uint32_t GuestPtr(void* p) { return Addr(p); }
 
 VoiceCallback* Vcb(FAudioVoiceCallback* cb) { return reinterpret_cast<VoiceCallback*>(cb); }
 

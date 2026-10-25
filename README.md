@@ -131,8 +131,8 @@ android/build-apk.sh arm64-v8a
 adb install -r build/apk/prototype.apk
 ```
 
-The deps (SDL2, FAudio, DXVK, Turnip) are also built by GitHub Actions. `cool_make.sh` is make with
-2 jobs that pauses when the CPU gets too hot, my laptop shut down once without it.
+The deps (SDL2, FAudio, DXVK, Turnip) are also built by GitHub Actions. `cool_make.sh` is make on all cores
+that pauses at 93°C, my laptop shut down once without it.
 
 Desktop build (DXVK 2.5.3 with `-Denable_d3d9=true -Ddxvk_native_wsi=sdl2` and FAudio in `~/proto-re-data/deps`):
 

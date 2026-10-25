@@ -86,8 +86,8 @@ bool LoadImage(const char* path, LoadedImage* out, uint32_t load_base) {
     }
     const uint32_t base = load_base ? load_base : opt->image_base;
     const uint32_t size = (opt->image_size + 0xfff) & ~0xfffu;
-    void* p = mmap(Ptr<void>(base), size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE,
-                   -1, 0);
+    // Inside the guest window InitGuestMemory reserved (kept out of the arena), so MAP_FIXED replaces only that.
+    void* p = mmap(Ptr<void>(base), size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
     if (p != Ptr<void>(base)) {
         Log("loader: cannot map %s at %08x", path, base);
         return false;

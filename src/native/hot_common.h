@@ -11,7 +11,7 @@ namespace native {
 inline uint32_t E(uint32_t a) { return a - 0x10000000u + kEngineBase; }
 
 inline float F(uint32_t a) { return RF32(a); }
-inline const float* FP(uint32_t a) { return Ptr<const float>(a); }
+inline const float* FP(uint32_t a) { return reinterpret_cast<const float*>(G(a)); }  // no null check: hot
 
 // Calls guest code at `va` (a guest address: E(...) for a fixed engine function, or a pointer read from guest
 // memory such as a vtable slot) from native code, on the same guest stack.

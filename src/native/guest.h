@@ -1,5 +1,5 @@
-// Native host (no Wine): runs the recompiled engine in a 64-bit process. Guest memory is the low 4 GiB of the
-// host address space (RECOMP_FLAT_MEMORY), so a guest address is directly usable as a host pointer.
+// Native host (no Wine): runs the recompiled engine in a 64-bit process. Guest memory is a private 4 GiB window of
+// the host address space at kGuestBase (RECOMP_FLAT_MEMORY, RECOMP_GUEST_BASE): a guest address is an offset into it.
 #pragma once
 
 #include <cstdarg>
@@ -30,10 +30,14 @@ void HeapFree(uint32_t addr);
 uint32_t HeapSize(uint32_t addr);
 uint32_t HeapRealloc(uint32_t addr, uint32_t size);
 
+// Guest address <-> host pointer. The guest's NULL stays nullptr (host code tests optional arguments for null).
+constexpr uint64_t kGuestBase = RECOMP_GUEST_BASE;
 template <typename T>
-inline T* Ptr(uint32_t a) { return reinterpret_cast<T*>(static_cast<uintptr_t>(a)); }
+inline T* Ptr(uint32_t a) { return a ? reinterpret_cast<T*>(static_cast<uintptr_t>(kGuestBase + a)) : nullptr; }
 inline char* Str(uint32_t a) { return Ptr<char>(a); }
-inline uint32_t Addr(const void* p) { return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(p)); }
+inline uint32_t Addr(const void* p) {
+    return p ? static_cast<uint32_t>(reinterpret_cast<uintptr_t>(p) - kGuestBase) : 0;
+}
 // Copies a host string into a new guest heap block.
 uint32_t GuestStrdup(const char* s);
 

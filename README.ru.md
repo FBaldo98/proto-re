@@ -132,8 +132,8 @@ android/build-apk.sh arm64-v8a
 adb install -r build/apk/prototype.apk
 ```
 
-Зависимости (SDL2, FAudio, DXVK, Turnip) ещё собирает GitHub Actions. `cool_make.sh` это make в 2 потока,
-который ставит сборку на паузу, когда процессор перегревается: без него ноут один раз выключился.
+Зависимости (SDL2, FAudio, DXVK, Turnip) ещё собирает GitHub Actions. `cool_make.sh` это make на всех ядрах,
+который ставит сборку на паузу при 93°C: без него ноут один раз выключился.
 
 Сборка для ПК (DXVK 2.5.3 с `-Denable_d3d9=true -Ddxvk_native_wsi=sdl2` и FAudio в `~/proto-re-data/deps`):
 

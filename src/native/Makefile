@@ -7,7 +7,9 @@ PLATFORM ?= linux
 # Generated for the rebased engine: recomp.py --functions all --base 0x7c000000 --split 400 --out build/recomp/native (see guest.h)
 RECOMP_DIR ?= ../../build/recomp/native
 DXVK ?= $(HOME)/proto-re-data/deps/dxvk
-COMMON_FLAGS := -DRECOMP_FLAT_MEMORY -fsigned-char -I../recomp
+# Guest memory: a 4 GiB window at 64 GiB (guest.h kGuestBase), clear of the low 4 GiB that Android's Java heap and
+# Qualcomm's GPU driver use.
+COMMON_FLAGS := -DRECOMP_FLAT_MEMORY -DRECOMP_GUEST_BASE=0x1000000000ull -fsigned-char -I../recomp
 # Generated code: flat memory turns G() into plain pointers. -O1 on the desktop keeps rebuilds quick; Android gets
 # -O2 (clang: barely slower to build).
 RECOMP_OPT ?= -O1

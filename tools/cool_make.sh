@@ -1,10 +1,11 @@
 #!/bin/bash
-# Thermal-guarded build for a laptop: runs make with few jobs at the lowest priority and pauses it while the CPU
+# Thermal-guarded build for a laptop: runs make on all cores at the lowest priority and pauses it while the CPU
 # package is too hot (SIGSTOP above HOT, SIGCONT below COOL, degrees C).
-# Usage: tools/cool_make.sh [make args...]      env: JOBS (2), HOT (85), COOL (72)
-JOBS=${JOBS:-2}
-HOT=${HOT:-85}
-COOL=${COOL:-72}
+# Usage: tools/cool_make.sh [make args...]      env: JOBS (all cores), HOT (93), COOL (85)
+# The CPU throttles itself near 100°C; the laptop once shut down there, so the build pauses a few degrees below.
+JOBS=${JOBS:-$(nproc)}
+HOT=${HOT:-93}
+COOL=${COOL:-85}
 temp() {
     sensors 2>/dev/null | awk '/^Package id 0:/ {gsub(/[+°C]/, "", $4); print int($4); exit}'
 }

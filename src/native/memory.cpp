@@ -1,17 +1,19 @@
-// Guest address space: the low 4 GiB of the host process.
+// Guest address space: a private 4 GiB window of the host address space at kGuestBase (guest.h), reserved
+// inaccessible at startup.
 //
 //   import thunks: an arena block (imports.cpp)
 //   kEngineBase (guest.h) engine image, rebased; kept out of the arena
-//   0x12000000 .. 0xf0000000  arena: VirtualAlloc pages, guest heap, stacks, TEBs
+//   0x01000000 .. 0x80000000  arena: VirtualAlloc pages, guest heap, stacks, TEBs (below 2 GiB: the game is not
+//                             large-address aware)
 //
-// The arena is the set of gaps between the mappings already there at startup (on Android, ART keeps its Java heap
-// and boot image below 4 GiB for compressed references). Guest allocations map their pages read/write with
-// MAP_NORESERVE when they are made (the kernel commits pages on first touch, close enough to VirtualAlloc's
-// reserve/commit) and unmap them when freed, leaving the rest of the low 4 GiB to others (Qualcomm's GPU driver).
+// Guest allocations make their pages read/write (MAP_NORESERVE: the kernel commits pages on first touch, close
+// enough to VirtualAlloc's reserve/commit) and frees make them inaccessible again. The window keeps the guest out of
+// the low 4 GiB, where Android's Java heap (up to 3+ GiB on some phones) and Qualcomm's GPU driver live.
 #include <sys/mman.h>
 #include <unistd.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <cstring>
 #include <string>
 #include <map>
@@ -23,8 +25,9 @@ namespace native {
 
 namespace {
 
-constexpr uint32_t kArenaLo = 0x12000000u;
-constexpr uint32_t kArenaHi = 0xf0000000u;
+constexpr uint32_t kArenaLo = 0x01000000u;
+constexpr uint32_t kArenaHi = 0x80000000u;
+constexpr uint64_t kWindow = 1ull << 32;
 constexpr uint32_t kPage = 0x10000u;  // VirtualAlloc allocation granularity
 
 std::mutex g_mutex;
@@ -33,47 +36,16 @@ std::map<uint32_t, uint32_t> g_used;  // start -> size, allocated page ranges
 
 uint32_t RoundUp(uint32_t v, uint32_t a) { return (v + a - 1) & ~(a - 1); }
 
-// Maps [a, a + size) for the guest unless something else got there first (MAP_FIXED_NOREPLACE).
+// Makes [a, a + size) of the guest window usable, or (unmap) inaccessible and empty again.
 bool MapGuest(uint32_t a, uint32_t size) {
-    void* p = mmap(reinterpret_cast<void*>(uintptr_t(a)), size, PROT_READ | PROT_WRITE,
-                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE, -1, 0);
-    if (p == reinterpret_cast<void*>(uintptr_t(a))) return true;
-    if (p != MAP_FAILED) munmap(p, size);  // an old kernel took the address as a hint only
-    return false;
+    return mmap(Ptr<void>(a), size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED,
+                -1, 0) != MAP_FAILED;
+}
+void UnmapGuest(uint32_t a, uint32_t size) {
+    mmap(Ptr<void>(a), size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED, -1, 0);
 }
 
-// Removes [lo, hi) from the candidate ranges.
-void Withdraw(uint64_t lo, uint64_t hi) {
-    for (auto f = g_free.begin(); f != g_free.end();) {
-        uint64_t fs = f->first, fe = fs + f->second;
-        if (fe <= lo || fs >= hi) {
-            ++f;
-            continue;
-        }
-        f = g_free.erase(f);
-        if (fs < lo) g_free[uint32_t(fs)] = uint32_t(lo - fs);
-        if (fe > hi) g_free[uint32_t(hi)] = uint32_t(fe - hi);
-    }
-}
-
-// Someone else (the GPU driver, ART) mapped into a candidate range: drop every foreign mapping from the candidates.
-void WithdrawForeignMappings() {
-    FILE* maps = fopen("/proc/self/maps", "r");
-    if (!maps) return;
-    char line[512];
-    while (fgets(line, sizeof(line), maps)) {
-        unsigned long long lo, hi;
-        if (sscanf(line, "%llx-%llx", &lo, &hi) != 2 || lo >= 0x100000000ull) continue;
-        auto u = g_used.upper_bound(uint32_t(lo));
-        if (u != g_used.begin() && std::prev(u)->first + uint64_t(std::prev(u)->second) > lo) continue;  // ours
-        Withdraw(lo & ~uint64_t(kPage - 1), (hi + kPage - 1) & ~uint64_t(kPage - 1));
-    }
-    fclose(maps);
-}
-
-// The arena is address space below 4 GiB that the guest may use (g_free), mapped only when the guest allocates
-// it. Reserving it all up front left nothing below 3 GiB for Qualcomm's driver, which maps GPU memory at matching
-// CPU and GPU addresses there (KGSL SVM): DXVK's first host-visible allocation failed.
+// The arena (g_free) is mapped page range by page range as the guest allocates it.
 uint32_t PageAllocLocked(uint32_t size, uint32_t at) {
     size = RoundUp(size ? size : 1, kPage);
     if (at) {
@@ -95,10 +67,7 @@ uint32_t PageAllocLocked(uint32_t size, uint32_t at) {
         if (at < fs || uint64_t(at) + size > uint64_t(fs) + fsz) {
             return 0;
         }
-        if (!MapGuest(at, size)) {
-            WithdrawForeignMappings();
-            return 0;
-        }
+        if (!MapGuest(at, size)) return 0;
         g_free.erase(f);
         if (at > fs) {
             g_free[fs] = at - fs;
@@ -109,15 +78,10 @@ uint32_t PageAllocLocked(uint32_t size, uint32_t at) {
         g_used[at] = size;
         return at;
     }
-    for (int attempt = 0; attempt < 8; ++attempt) {
-        auto f = g_free.begin();
-        while (f != g_free.end() && f->second < size) ++f;
-        if (f == g_free.end()) return 0;
+    for (auto f = g_free.begin(); f != g_free.end(); ++f) {
+        if (f->second < size) continue;
         uint32_t a = f->first, rest = f->second - size;
-        if (!MapGuest(a, size)) {
-            WithdrawForeignMappings();
-            continue;
-        }
+        if (!MapGuest(a, size)) return 0;
         g_free.erase(f);
         if (rest) {
             g_free[a + size] = rest;
@@ -159,54 +123,17 @@ int ClassFor(uint32_t total) {
 
 }  // namespace
 
-// Top of the arena; setting arena_top (hex) lowers it.
-uint64_t ArenaTop() {
-    std::string top = Setting("arena_top", "");
-    if (!top.empty()) return std::min<uint64_t>(strtoull(top.c_str(), nullptr, 16), kArenaHi);
-    return kArenaHi;
-}
-
 void InitGuestMemory() {
-    // Mappings overlapping the arena, rounded out to the allocation granularity.
-    std::map<uint64_t, uint64_t> taken;  // start -> end
-    if (FILE* maps = fopen("/proc/self/maps", "r")) {
-        char line[512];
-        while (fgets(line, sizeof(line), maps)) {
-            unsigned long long lo, hi;
-            if (sscanf(line, "%llx-%llx", &lo, &hi) != 2 || lo >= kArenaHi || hi <= 0x10000000u) continue;
-            taken[lo & ~uint64_t(kPage - 1)] = (hi + kPage - 1) & ~uint64_t(kPage - 1);
-#ifdef __ANDROID__
-            Log("memory: below 4 GiB: %.120s", line);
-#endif
-        }
-        fclose(maps);
+    void* want = reinterpret_cast<void*>(static_cast<uintptr_t>(kGuestBase));
+    void* p = mmap(want, kWindow, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE, -1, 0);
+    if (p != want) {
+        Fatal("cannot reserve the guest address space at %llx (%s)", (unsigned long long)kGuestBase,
+              p == MAP_FAILED ? strerror(errno) : "taken");
     }
-    // The recompiled code only works with the engine at kEngineBase: say so plainly if something already sits there.
-    for (const auto& t : taken) {
-        if (t.first < uint64_t(kEngineBase) + kEngineReserve && t.second > kEngineBase) {
-            Fatal("the engine's address range %08x-%08x is in use (%08llx-%08llx, see the memory lines above)",
-                  kEngineBase, kEngineBase + kEngineReserve, (unsigned long long)t.first,
-                  (unsigned long long)t.second);
-        }
-    }
-    taken[kEngineBase] = uint64_t(kEngineBase) + kEngineReserve;
-    const uint64_t top = ArenaTop();
-    uint64_t cursor = kArenaLo, total = 0;
-    auto reserve = [&](uint64_t lo, uint64_t hi) {  // candidates only: mapped on allocation
-        if (hi <= lo) return;
-        g_free[uint32_t(lo)] = uint32_t(hi - lo);
-        total += hi - lo;
-    };
-    for (const auto& t : taken) {
-        if (t.first > cursor) reserve(cursor, std::min(t.first, top));
-        if (t.second > cursor) cursor = t.second;
-    }
-    reserve(cursor, top);
-    if (total < (512u << 20)) Fatal("guest arena too small: %llu MiB free below 4 GiB", (unsigned long long)(total >> 20));
-    if (!taken.empty()) {
-        Log("memory: arena %llu MiB in %zu ranges, top %08llx", (unsigned long long)(total >> 20), g_free.size(),
-            (unsigned long long)top);
-    }
+    g_free[kArenaLo] = kEngineBase - kArenaLo;
+    g_free[kEngineBase + kEngineReserve] = kArenaHi - (kEngineBase + kEngineReserve);
+    Log("memory: guest window at %llx, arena %u MiB", (unsigned long long)kGuestBase,
+        (kArenaHi - kArenaLo - kEngineReserve) >> 20);
     InitClasses();
 }
 
@@ -240,7 +167,7 @@ void PageFree(uint32_t addr) {
     }
     uint32_t a = u->first, size = u->second;
     g_used.erase(u);
-    munmap(Ptr<void>(a), size);  // back to the address space pool (zero pages on reuse, as VirtualAlloc guarantees)
+    UnmapGuest(a, size);  // drops the pages: zero on reuse, as VirtualAlloc guarantees
     auto next = g_free.find(a + size);
     if (next != g_free.end()) {
         size += next->second;
