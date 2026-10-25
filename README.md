@@ -59,10 +59,26 @@ Logs go to the same folder (`proto-native.log`, `app_process64_d3d9.log`) and to
 | `battery_saver` | 30 fps, no big core pinning |
 | `perf_hint` | ADPF on/off |
 | `vulkan_driver` | `auto` / `system` / `turnip` |
+| `audio_driver` | `aaudio` (default) / `openslES`, try it if the sound stutters |
 | `present_stats` | DXVK stats in the log |
 | `import_profile`, `watchdog` | profiling, hang diagnostics |
 
 Every key also works as an env var `PROTORE_<KEY>`.
+
+## Reporting a problem
+
+**Attach the logs to every issue.** Without them a crash can't be fixed, "it crashes" alone tells nothing.
+
+The logs are in `Android/data/com.protore.game/files/` (on Android 11+ copy them with a PC over USB or a file
+manager that can open Android/data). Attach these files as they are, don't paste parts of them:
+
+- `proto-native.log`: the engine log of the last run
+- `proto-native.prev.log`: the run before it (it shows a crash that happened on the previous start)
+- `app_process64_d3d9.log`: the DXVK (graphics) log
+- `turnip_failed`, if that file exists
+
+Also write the phone model, the chip (for example Snapdragon 8 Gen 2 / Dimensity 9000 / Exynos 1380), the Android
+version, the version of the APK and when the problem happens (at start, in the menu, in the game).
 
 ## How it works
 
