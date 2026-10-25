@@ -45,6 +45,8 @@ ifneq ($(and $(filter arm64-v8a,$(ABI)),$(wildcard $(TURNIP)/lib/libadrenotools.
 DEP_INCLUDES += -I$(TURNIP)/include -DPROTORE_ADRENOTOOLS
 LDFLAGS += -L$(TURNIP)/lib -ladrenotools -llinkernsbypass -ldl \
            -Wl,--defsym=android_get_device_api_level=protore_device_api_level
+# The driver probe program (turnip_probe.cpp): API 29 like libadrenotools, plain ARMv8.0 so one build runs on all.
+EXTRA := $(OUT)/libturnipprobe.so
 endif
 BINARY := libmain.so
 else
@@ -68,10 +70,17 @@ SRCS := main.cpp memory.cpp loader.cpp imports.cpp runtime.cpp thread.cpp kernel
 GEN := $(wildcard $(RECOMP_DIR)/*.c)
 OBJS = $(SRCS:%.cpp=$(OUT)/%.o) $(GEN:$(RECOMP_DIR)/%.c=$(OUT)/gen/%.o)
 
+all: $(OUT)/$(BINARY) $(EXTRA)
+
+$(OUT)/libturnipprobe.so: turnip_probe.cpp turnip_load.h
+	@mkdir -p $(dir $@)
+	$(TOOLCHAIN)/aarch64-linux-android29-clang++ -std=c++17 -O2 -fPIE -pie -march=armv8-a -moutline-atomics -static-libstdc++ \
+		-I$(TURNIP)/include -o $@ $< -L$(TURNIP)/lib -ladrenotools -llinkernsbypass -ldl -llog
+
 $(OUT)/$(BINARY): $(OBJS)
 	$(CXX) -o $@ $^ $(LDFLAGS)
 
-$(OUT)/%.o: %.cpp guest.h win.h ../recomp/runtime.h d3d9_gen.inc
+$(OUT)/%.o: %.cpp guest.h win.h turnip_load.h ../recomp/runtime.h d3d9_gen.inc
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
@@ -82,4 +91,4 @@ $(OUT)/gen/%.o: $(RECOMP_DIR)/%.c ../recomp/runtime.h ../recomp/runtime_fp.h
 clean:
 	rm -rf $(OUT)
 
-.PHONY: clean
+.PHONY: all clean

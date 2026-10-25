@@ -38,6 +38,10 @@ for abi in "${ABIS[@]}"; do
     cp "$ROOT/build/android/$abi/libmain.so" "$DEPS_ROOT/$abi"/lib/lib{SDL2,FAudio,dxvk_d3d9}.so "$OUT/pkg/lib/$abi/"
     # arm64: libmain.so targets ARMv8.2 + RCpc; the ARMv8.0 build for older cores (make ... ARM_ARCH=armv8-a
     # OUT=../../build/android/arm64-v8a-v80) ships next to it, ProtoActivity picks one at run time.
+    # The Turnip probe program (an executable, named like a library so the installer extracts it with the rest).
+    if [ -e "$ROOT/build/android/$abi/libturnipprobe.so" ]; then
+        cp "$ROOT/build/android/$abi/libturnipprobe.so" "$OUT/pkg/lib/$abi/"
+    fi
     if [ -e "$ROOT/build/android/$abi-v80/libmain.so" ]; then
         cp "$ROOT/build/android/$abi-v80/libmain.so" "$OUT/pkg/lib/$abi/libmain_v80.so"
     fi
