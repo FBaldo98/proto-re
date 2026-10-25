@@ -62,6 +62,9 @@ void Log(const char* fmt, ...) {
     }
 }
 
+void VulkanDriverAbandon();  // vulkan_driver.cpp
+void VulkanDriverCrashed();
+
 namespace {
 
 // Crash report: the fault and the faulting code's library + offset go to the log (and logcat), then the previous
@@ -97,6 +100,7 @@ void DescribeAddress(char* out, size_t size, const char* what, uintptr_t address
 }
 
 void OnCrash(int sig, siginfo_t* info, void* context) {
+    VulkanDriverCrashed();  // a crash before the driver is confirmed: auto mode avoids Turnip next time
     char line[512];
     snprintf(line, sizeof(line), "crash: signal %d (%s) code %d addr %p on tid %d", sig, strsignal(sig), info->si_code,
              info->si_addr, int(gettid()));
@@ -143,7 +147,6 @@ void InstallCrashHandler() {
 
 }  // namespace
 
-void VulkanDriverAbandon();  // vulkan_driver.cpp
 std::string TakeIoStats();   // kernel32.cpp
 std::string ArenaUsage();    // memory.cpp
 
@@ -444,6 +447,7 @@ int main(int argc, char** argv) {
                 // (EngineTerminate waits for its threads) took long enough for "isn't responding". The game saves
                 // at its checkpoints, so there is nothing to lose by ending the process here.
                 Log("quit");
+                VulkanDriverAbandon();
                 _exit(0);
 #endif
                 quit = true;

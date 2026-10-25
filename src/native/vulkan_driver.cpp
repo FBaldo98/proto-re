@@ -8,6 +8,7 @@
 
 #if defined(__ANDROID__) && defined(PROTORE_ADRENOTOOLS)
 #include <dlfcn.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
 #include <sys/system_properties.h>
@@ -84,14 +85,21 @@ std::string ProbeDevice(PFN_vkGetInstanceProcAddr gipa, const char* driver, std:
 // Logs the system driver's GPU, for reports from phones where Turnip is not used. DXVK needs Vulkan 1.3: an older
 // system driver (Qualcomm's for Adreno 6xx/710 on many phones) cannot run the game, so say that plainly instead of
 // letting DXVK fail later with "no adapters found".
-void LogSystemDevice() {
+// The system driver's GPU and Vulkan version (0 when it has no device); logged.
+uint32_t SystemDriverApi(std::string& device) {
     void* lib = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
     auto gipa = lib ? reinterpret_cast<PFN_vkGetInstanceProcAddr>(dlsym(lib, "vkGetInstanceProcAddr")) : nullptr;
-    if (!gipa) return;
+    if (!gipa) return 0;
     std::string report;
     uint32_t api = 0;
-    std::string device = ProbeDevice(gipa, "system driver", report, &api);
+    device = ProbeDevice(gipa, "system driver", report, &api);
     Log("%s", report.c_str());
+    return device.empty() ? 0 : api;
+}
+
+void LogSystemDevice() {
+    std::string device;
+    uint32_t api = SystemDriverApi(device);
     if (!device.empty() && api < VK_API_VERSION_1_3) {
         char msg[512];
         snprintf(msg, sizeof(msg),
@@ -215,22 +223,15 @@ std::string GpuModel() {
     return buf;
 }
 
-// Crash guard (working directory = the app's files folder): turnip_pending exists while a Turnip run has not yet
-// reached VulkanDriverConfirm. If it is still there at the next start, that run crashed or hung during startup (its
-// log is proto-native.prev.log): turnip_failed is written and auto mode stays on the system driver for this build;
-// vulkan_driver = turnip still forces Turnip. A failed test in the child process is not recorded: it costs a second
-// and is retried (and logged) at every start.
-constexpr const char* kPending = "turnip_pending";
+// Crash guard (working directory = the app's files folder): while a Turnip run has not yet reached
+// VulkanDriverConfirm, a crash (the crash handler calls VulkanDriverCrashed) writes turnip_failed, and auto mode then
+// uses the system driver for this build, unless that driver cannot run the game anyway (Vulkan < 1.3: nothing to
+// lose by trying Turnip again). Quitting, being closed from the launcher or killed by the system is no failure: it
+// used to count as one and locked phones whose only usable driver is Turnip out of the game. vulkan_driver = turnip
+// forces Turnip. A failed test in the child process is not recorded: it costs a second and is retried at every start.
 constexpr const char* kFailed = "turnip_failed";
 constexpr const char* kBuild = __DATE__ " " __TIME__;  // a failure recorded by another build is retried
 bool g_turnip_pending = false;
-
-void MarkFailed(const char* reason) {
-    if (FILE* f = fopen(kFailed, "w")) {
-        fprintf(f, "%s\n%s\n", kBuild, reason);
-        fclose(f);
-    }
-}
 
 // The recorded reason if Turnip failed with this build, "" otherwise.
 std::string FailedBefore() {
@@ -248,17 +249,23 @@ std::string FailedBefore() {
 
 }  // namespace
 
-void VulkanDriverAbandon() {
-    if (!g_turnip_pending) return;
-    g_turnip_pending = false;
-    unlink(kPending);
-}
+void VulkanDriverAbandon() { g_turnip_pending = false; }
 
 void VulkanDriverConfirm() {
     if (!g_turnip_pending) return;
     g_turnip_pending = false;
-    unlink(kPending);
     Log("vulkan: Turnip startup ok");
+}
+
+// From the crash handler: only open/write/close.
+void VulkanDriverCrashed() {
+    if (!g_turnip_pending) return;
+    int fd = open(kFailed, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) return;
+    static const char reason[] = "\nthe game crashed during startup on Turnip (see proto-native.prev.log)\n";
+    (void)!write(fd, kBuild, strlen(kBuild));
+    (void)!write(fd, reason, sizeof(reason) - 1);
+    close(fd);
 }
 
 void SelectVulkanDriver() {
@@ -268,18 +275,17 @@ void SelectVulkanDriver() {
         LogSystemDevice();
         return;
     }
-    if (access(kPending, F_OK) == 0) {
-        unlink(kPending);
-        MarkFailed("the game crashed or hung during startup on Turnip (see proto-native.prev.log)");
-        Log("vulkan: the last Turnip run ended during startup");
-    }
+    unlink("turnip_pending");  // left by older builds
     if (mode == "turnip") {
         unlink(kFailed);
     } else if (std::string why = FailedBefore(); !why.empty()) {
-        Log("vulkan: Turnip failed here before: %s; using the system driver (vulkan_driver = turnip forces Turnip)",
-            why.c_str());
-        LogSystemDevice();
-        return;
+        Log("vulkan: Turnip failed here before: %s", why.c_str());
+        std::string device;
+        if (SystemDriverApi(device) >= VK_API_VERSION_1_3) {
+            Log("vulkan: using the system driver (vulkan_driver = turnip forces Turnip)");
+            return;
+        }
+        Log("vulkan: the system driver cannot run the game, trying Turnip again");
     }
     // Adreno 8xx: Turnip's support for them is new (an Adreno 840 hung at startup), and Qualcomm's driver there has
     // Vulkan 1.3, which DXVK needs. vulkan_driver = turnip still tries Turnip.
@@ -322,7 +328,6 @@ void SelectVulkanDriver() {
     snprintf(hex, sizeof(hex), "%llx", (unsigned long long)reinterpret_cast<uintptr_t>(gipa));
     setenv("DXVK_VK_GIPA", hex, 1);
     Log("vulkan: using %s", device.c_str());
-    if (FILE* f = fopen(kPending, "w")) fclose(f);
     g_turnip_pending = true;
 }
 
@@ -335,6 +340,7 @@ namespace native {
 void SelectVulkanDriver() {}
 void VulkanDriverConfirm() {}
 void VulkanDriverAbandon() {}
+void VulkanDriverCrashed() {}
 
 }  // namespace native
 
