@@ -133,7 +133,14 @@ PFN_vkGetInstanceProcAddr LoadTurnip(const Driver& d, std::string& device, std::
         report = "vulkan: the adrenotools loader has no vkGetInstanceProcAddr";
         return nullptr;
     }
-    device = ProbeDevice(gipa, d.file.c_str(), report);
+    uint32_t api = 0;
+    device = ProbeDevice(gipa, d.file.c_str(), report, &api);
+    // DXVK needs Vulkan 1.3; Turnip 26.2 offers only 1.0 on an Adreno 610, where 26.3 runs the game.
+    if (!device.empty() && api < VK_API_VERSION_1_3) {
+        report += " (needs Vulkan 1.3)";
+        device.clear();
+        return nullptr;
+    }
     if (device.empty() || (!d.custom && device.find("Turnip") == std::string::npos)) {
         report += device.empty() ? "" : " (not Turnip: the driver did not load)";
         device.clear();
