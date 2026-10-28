@@ -6,11 +6,13 @@ Native Android port of Prototype (2009). Not an emulator and not Wine: `prototyp
 recompiled from x86 to C, built for arm64 and run on top of my own Win32/D3D9 layer (SDL2, DXVK, FAudio).
 The APK has no game data in it, you copy the files from your own copy of the game.
 
-Roadmap (Russian): [ROADMAP.md](ROADMAP.md).
+**v0.2.0 is the last update.** I'm not planning more work on the port; the code stays here as it is.
+
+If you like the port, you can support me on Patreon: **[patreon.com/VinTeRuS](https://www.patreon.com/cw/VinTeRuS/membership)** (from $3 a month).
 
 ## Status
 
-Runs on the phone: menus, videos, sound, missions, saves. A full playthrough is not tested yet. Russian text works (fan translation).
+Runs on the phone: menus, sound, missions, saves. A full playthrough is not tested yet. Russian text works (fan translation).
 
 - touch controls with a layout editor, camera sensitivity, invert Y, vibration
 - gamepad
@@ -21,26 +23,22 @@ Runs on the phone: menus, videos, sound, missions, saves. A full playthrough is 
 Pixel 6 (Mali-G78): menus 60 fps, gameplay 38-46 at 720p and 33-42 at 1080p. Gameplay is CPU bound right now.
 A phone with Adreno 735: about 40 fps on average at 720p.
 
-## TODO
+## Known issues
 
-- 60 fps at 1080p. Mostly CPU work: rewrite the hot functions of the main/render threads by hand, cut down
-  D3D9 buffer locking, try LTO/PGO. Later maybe 30 Hz sim with interpolated 60 Hz rendering and FSR/ASR upscaling.
-- auto quality presets on first launch, built-in benchmark
-- ASTC/ETC2 textures, less heat and battery drain
-- controls: context buttons in fights (grab/throw, consume, shield), swipe wheel for powers and disguises,
-  target lock on the nearest enemy, separate layouts for helicopter/tank, stick dead zone
-- test on real Adreno phones and weaker Mali (G57/G68)
-- GLES 3.0 fallback for phones with bad Vulkan drivers
-- first launch screen to pick the game folder and check files
-- language switch in settings, audio overlay support in case a Russian dub ever shows up
-- save backups
+- Videos (Bink) don't play: intro movies are skipped and Web of Intrigue memories stay black.
+- GPUs whose driver only has Vulkan 1.1 or 1.2 (older Mali like G52/G57/G76, PowerVR, some Adreno 6xx/7xx without
+  Turnip) can't run it: the graphics layer (DXVK) needs Vulkan 1.3.
+- Adreno 8xx (Snapdragon 8 Elite and newer): Qualcomm's own driver fails, the game uses the bundled Turnip; if that
+  doesn't work on your phone, put a newer Turnip build in `files/driver/` (see below).
+- Gameplay is CPU bound, about 35-45 fps on a Pixel 6.
 
 ## Installing
 
 Android 10+, arm64, and a bought copy of the game (PC, Steam app 10150, build 19788432).
 
 1. Install `prototype.apk` and start it. Without the game files it shows where to put them and creates the folder.
-2. Copy `prototypeenginef.dll`, all `.rcf` and `.p3d` files and the `art`, `audio`, `scripts` folders to either
+2. Copy `prototypeenginef.dll`, `proto_uv.dat`, all `.rcf` and `.p3d` files and the `art`, `audio`, `scripts`
+   folders (the game closes right after starting without `proto_uv.dat`) to either
    `/sdcard/Android/data/com.protore.game/files/game/` (file managers often can't open it on Android 11+, copy from a
    PC over USB) or `/sdcard/Prototype/` (any file manager; tap "Allow file access" on the setup screen).
    For Russian, use the `.rcf` files with the translation applied.
@@ -66,7 +64,7 @@ Logs go to the same folder (`proto-native.log`, `app_process64_d3d9.log`) and to
 Every key also works as an env var `PROTORE_<KEY>`.
 
 GPU drivers on Adreno: the game tries Turnip 26.2, then Turnip 26.3 (for Adreno 710/720), then the phone's own driver
-(needs Vulkan 1.3). On Adreno 8xx it uses the phone's driver. To use your own driver (an Adreno Vulkan driver `.so`,
+(needs Vulkan 1.3). On Adreno 8xx it tries Turnip 26.3 first. To use your own driver (an Adreno Vulkan driver `.so`,
 for example a Turnip build made for emulators), put it in `Android/data/com.protore.game/files/driver/`; the game
 tries it first. Delete it from there to go back.
 

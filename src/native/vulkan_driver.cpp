@@ -266,11 +266,10 @@ void SelectVulkanDriver() {
         }
         Log("vulkan: the system driver cannot run the game, trying Turnip again");
     }
-    // Adreno 8xx: Turnip's support for them is new (an Adreno 840 hung at startup), and Qualcomm's driver there has
-    // Vulkan 1.3, which DXVK needs. vulkan_driver = turnip still tries Turnip.
+    // Adreno 8xx: Qualcomm's driver fails DXVK's first host-visible allocation there (Adreno 825/830/840 logs:
+    // a black screen), while Turnip from Mesa 26.3 knows these GPUs; so Turnip is tried first like elsewhere.
     const std::string model = GpuModel();
     if (!model.empty()) Log("vulkan: GPU %s", model.c_str());
-    const bool skip_bundled = mode == "auto" && model.compare(0, 7, "Adreno8") == 0;
     const char* libdir = getenv("PROTORE_NATIVE_LIB_DIR");  // set by ProtoActivity: the APK's extracted libraries
     if (!libdir) {
         LogSystemDevice();
@@ -286,9 +285,8 @@ void SelectVulkanDriver() {
         drivers.push_back({hooks, path.substr(0, slash + 1), path.substr(slash + 1), true});
     }
     for (const char* file : {"libvulkan_freedreno.so", "libvulkan_freedreno_next.so"}) {
-        if (!skip_bundled && access((hooks + file).c_str(), F_OK) == 0) drivers.push_back({hooks, hooks, file, false});
+        if (access((hooks + file).c_str(), F_OK) == 0) drivers.push_back({hooks, hooks, file, false});
     }
-    if (skip_bundled) Log("vulkan: Adreno 8xx: the bundled Turnip is skipped for Qualcomm's driver");
     PFN_vkGetInstanceProcAddr gipa = nullptr;
     std::string device;
     for (const Driver& d : drivers) {

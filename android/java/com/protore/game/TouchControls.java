@@ -68,7 +68,7 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
         final boolean gameOnly;
         float customX = -1, customY = -1;
         float size = 1;  // the layout editor's per-button size factor
-        boolean quickPower;  // DISGUISE / ATK PWR / DEFENSE / SENSE: shown only with the "Power buttons" setting
+        boolean quickPower;  // the extra buttons: shown only with the "Extra buttons" setting
         // POWERS and DISGUISE hold a selection wheel open: sliding the finger that holds the button moves the mouse,
         // which is how the game picks an entry, so one thumb is enough. fx/fy: where that finger is.
         final boolean wheel;
@@ -88,7 +88,9 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
             this.sizeDp = sizeDp;
             this.gameOnly = gameOnly;
             this.quickPower = keycode == KeyEvent.KEYCODE_F || keycode == KeyEvent.KEYCODE_1
-                    || keycode == KeyEvent.KEYCODE_3 || keycode == KeyEvent.KEYCODE_4;
+                    || keycode == KeyEvent.KEYCODE_2 || keycode == KeyEvent.KEYCODE_3 || keycode == KeyEvent.KEYCODE_4
+                    || keycode == KeyEvent.KEYCODE_DPAD_DOWN || keycode == KeyEvent.KEYCODE_F1
+                    || keycode == KeyEvent.KEYCODE_F2;
             this.wheel = keycode == KeyEvent.KEYCODE_R || keycode == KeyEvent.KEYCODE_F;
         }
 
@@ -111,12 +113,17 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
         new Button("TARGET", KeyEvent.KEYCODE_TAB, 0, true, 258, true, 140, 27, true),  // lock-on is Tab on PC
         new Button("SPRINT", KeyEvent.KEYCODE_SHIFT_LEFT, 0, true, 168, true, 245, 27, true),
         new Button("POWERS", KeyEvent.KEYCODE_R, 0, true, 190, false, 33, 24, true),  // Power Select Menu: R
-        // Quick powers (PC keys from the game's Keyboard Setup): last disguise power menu, last attack, defense and
-        // sensory power. Appended, so the saved positions of the buttons above keep their indices.
-        new Button("DISGUISE", KeyEvent.KEYCODE_F, 0, true, 370, false, 33, 24, true),
+        // Extra buttons (PC keys from the game's Keyboard Setup): disguise powers menu, last attack, defense and
+        // sensory power; then last disguise power, Web of Intrigue, take a disguise and back to Alex. Appended, so
+        // the saved positions of the buttons above keep their indices.
+        new Button("DSG MENU", KeyEvent.KEYCODE_F, 0, true, 370, false, 33, 24, true),
         new Button("ATK PWR", KeyEvent.KEYCODE_1, 0, true, 280, false, 95, 22, true),
         new Button("DEFENSE", KeyEvent.KEYCODE_3, 0, true, 190, false, 95, 22, true),
         new Button("SENSE", KeyEvent.KEYCODE_4, 0, true, 100, false, 95, 22, true),
+        new Button("DSG PWR", KeyEvent.KEYCODE_2, 0, true, 370, false, 95, 22, true),
+        new Button("WEB", KeyEvent.KEYCODE_DPAD_DOWN, 0, true, 460, false, 33, 22, true),
+        new Button("DISGUISE", KeyEvent.KEYCODE_F1, 0, true, 460, false, 95, 22, true),
+        new Button("ALEX", KeyEvent.KEYCODE_F2, 0, true, 550, false, 95, 22, true),
     };
 
     // ---- settings ----
@@ -165,7 +172,7 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
         new Setting("Camera speed", "ui_cam", new String[] {"50%", "75%", "100%", "150%", "200%"},
                 new int[] {50, 75, 100, 150, 200}, false),
         new Setting("Invert Y", "ui_invert", new String[] {"Off", "On"}, new int[] {0, 1}, false),
-        new Setting("Power buttons", "ui_power_buttons", new String[] {"Off", "On"}, new int[] {0, 1}, false),
+        new Setting("Extra buttons", "ui_power_buttons", new String[] {"Off", "On"}, new int[] {0, 1}, false),
     };
     private static final int[] DEFAULTS = {1, 1, 0, 0, 2, 1, 1, 0, 0, 0, 2, 0, 0};
     private boolean panelOpen = false, restartNeeded = false;
@@ -176,6 +183,7 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
     private boolean editing = false;
     private final RectF doneRect = new RectF(), resetRect = new RectF();
     private final RectF smallerRect = new RectF(), biggerRect = new RectF();
+    private final RectF supportRect = new RectF();  // the "Support on Patreon" link in the settings panel
     private Button selected;          // the button (or stick) the size buttons act on
     private boolean selectedStick;
     private float stickSize = 1;
@@ -725,6 +733,10 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
             startEditing();
             return;
         }
+        if (supportRect.contains(x, y)) {
+            SetupActivity.openSupport(getContext());
+            return;
+        }
         for (int i = 0; i < settings.length; i++) {
             int delta = leftArrows.get(i).contains(x, y) ? -1 : rightArrows.get(i).contains(x, y) ? 1 : 0;
             if (delta == 0) continue;
@@ -939,7 +951,12 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
         text.setTextAlign(Paint.Align.LEFT);
         c.drawText(SetupActivity.CREDIT, panel.left + pad, panel.top + 34 * density, text);
         text.setTextAlign(Paint.Align.RIGHT);
-        c.drawText(SetupActivity.CREDIT_URL, panel.right - pad, panel.top + 34 * density, text);
+        text.setColor(0xffffc04d);
+        String support = "Support on Patreon";
+        c.drawText(support, panel.right - pad, panel.top + 34 * density, text);
+        float sw = text.measureText(support);
+        supportRect.set(panel.right - pad - sw - 8 * density, panel.top + 14 * density, panel.right - pad + 8 * density,
+                panel.top + 44 * density);
         text.setTextAlign(Paint.Align.CENTER);
         // two columns of settings
         int rows = (settings.length + 1) / 2;

@@ -35,6 +35,17 @@ public class SetupActivity extends Activity {
     /** Shown on the setup screen and in the in-game settings panel. */
     static final String CREDIT = "Android port by VinTeRuS";
     static final String CREDIT_URL = "github.com/VinTeRuS/proto-re";
+    static final String SUPPORT_URL = "https://www.patreon.com/cw/VinTeRuS/membership";
+
+    /** Opens the author's Patreon page in the browser. */
+    static void openSupport(android.content.Context context) {
+        try {
+            context.startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(SUPPORT_URL))
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+        } catch (Exception ignored) {
+            // no browser
+        }
+    }
 
     private static final String DLL = "prototypeenginef.dll";
     private static final int REQUEST_STORAGE = 1;
@@ -59,18 +70,43 @@ public class SetupActivity extends Activity {
         check();  // also after coming back from the permission screen
     }
 
+    /**
+     * Files the game reads at start (from the PC game folder). Without proto_uv.dat, for one, it closes a second
+     * after starting with no message.
+     */
+    private static final String[] REQUIRED = {
+        DLL, "proto_uv.dat", "cementfiles.p3d", "skuinfo.p3d", "art.rcf", "cells.rcf", "scripts.rcf",
+        "shaders.rcf", "00woi.rcf",
+    };
+
+    /** The required files missing from `dir` (names compared ignoring case, like the game does). */
+    private static java.util.List<String> missing(File dir) {
+        java.util.Set<String> have = new java.util.HashSet<>();
+        String[] names = dir == null ? null : dir.list();
+        if (names != null) for (String n : names) have.add(n.toLowerCase(java.util.Locale.ROOT));
+        java.util.List<String> out = new java.util.ArrayList<>();
+        for (String r : REQUIRED) if (!have.contains(r)) out.add(r);
+        return out;
+    }
+
     private void check() {
         File app = appGame();
         if (app != null) app.mkdirs();
         File shared = sharedGame();
         if (hasSharedAccess()) shared.mkdirs();
-        if (app != null && new File(app, DLL).canRead()) {
-            launch(null);
-        } else if (hasSharedAccess() && new File(shared, DLL).canRead()) {
-            launch(shared);
-        } else {
-            showHelp(app, shared);
+        File found = null;
+        if (app != null && new File(app, DLL).canRead()) found = app;
+        else if (hasSharedAccess() && new File(shared, DLL).canRead()) found = shared;
+        if (found == null) {
+            showHelp(app, shared, null);
+            return;
         }
+        java.util.List<String> lack = missing(found);
+        if (!lack.isEmpty()) {
+            showHelp(app, shared, found.getAbsolutePath() + " is missing: " + String.join(", ", lack));
+            return;
+        }
+        launch(found == app ? null : shared);
     }
 
     private void launch(File gameDir) {
@@ -162,14 +198,19 @@ public class SetupActivity extends Activity {
         return b;
     }
 
-    private void showHelp(File app, File shared) {
+    private void showHelp(File app, File shared, String problem) {
         LinearLayout col = new LinearLayout(this);
         col.setOrientation(LinearLayout.VERTICAL);
         col.setPadding(dp(32), dp(24), dp(32), dp(24));
-        col.addView(text("Game files not found", 22, true));
+        col.addView(text(problem == null ? "Game files not found" : "Some game files are missing", 22, true));
+        if (problem != null) {
+            TextView p = text(problem, 15, true);
+            p.setTextColor(Color.rgb(255, 120, 100));
+            col.addView(p);
+        }
         col.addView(text("Copy the contents of your Prototype folder (PC version, Steam): prototypeenginef.dll, "
-                + "all .rcf and .p3d files and the art, audio and scripts folders, to one of these places:", 15,
-                false));
+                + "proto_uv.dat, all .rcf and .p3d files and the art, audio and scripts folders, to one of these "
+                + "places:", 15, false));
         col.addView(text("1. " + (app != null ? app.getAbsolutePath() : "Android/data/" + getPackageName()
                 + "/files/game") + "\n   The folder exists now. On Android 11+ most file managers cannot open "
                 + "Android/data; copy from a PC over USB, or use option 2.", 14, false));
@@ -184,6 +225,7 @@ public class SetupActivity extends Activity {
         row.addView(button("Check again", this::check));
         if (!hasSharedAccess()) row.addView(button("Allow file access", this::requestAccess));
         row.addView(button("Exit", this::finish));
+        row.addView(button("Support on Patreon", () -> openSupport(this)));
         col.addView(row);
         TextView credit = text(CREDIT + " \u00b7 " + CREDIT_URL, 12, false);
         credit.setTextColor(Color.rgb(150, 150, 150));

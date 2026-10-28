@@ -901,6 +901,44 @@ index 27d6bb1..922f178 100644
  
      return status;
    }
+diff --git a/src/dxvk/dxvk_swapchain_blitter.cpp b/src/dxvk/dxvk_swapchain_blitter.cpp
+index aca8718..6dd42ae 100644
+--- a/src/dxvk/dxvk_swapchain_blitter.cpp
++++ b/src/dxvk/dxvk_swapchain_blitter.cpp
+@@ -15,6 +15,11 @@ namespace dxvk {
+     m_pipelineLayout(createPipelineLayout()) {
+     this->createSampler();
+     this->createShaders();
++
++    // Android port: without null descriptors (Mali) the gamma slot needs a real image even when the
++    // application sets no gamma ramp; an identity ramp leaves the picture unchanged.
++    if (!m_device->features().extRobustness2.nullDescriptor)
++      this->setGammaRamp(0, nullptr);
+   }
+ 
+ 
+@@ -165,6 +170,21 @@ namespace dxvk {
+       m_gammaCpCount = cpCount;
+ 
+       std::memcpy(m_gammaBuffer->mapPtr(0), cpData, cpCount * sizeof(*cpData));
++    } else if (!m_device->features().extRobustness2.nullDescriptor) {
++      // Android port: identity ramp instead of no gamma image (see the constructor)
++      static const DxvkGammaCp identity[2] = { { 0u, 0u, 0u, 0u }, { 0xffffu, 0xffffu, 0xffffu, 0xffffu } };
++
++      DxvkBufferCreateInfo bufferInfo = { };
++      bufferInfo.size = sizeof(identity);
++      bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
++      bufferInfo.stages = VK_PIPELINE_STAGE_TRANSFER_BIT;
++      bufferInfo.access = VK_ACCESS_TRANSFER_READ_BIT;
++
++      m_gammaBuffer = m_device->createBuffer(bufferInfo,
++        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
++      m_gammaCpCount = 2u;
++
++      std::memcpy(m_gammaBuffer->mapPtr(0), identity, sizeof(identity));
+     } else {
+       // Destroy gamma image altogether
+       m_gammaBuffer = nullptr;
 diff --git a/src/dxvk/dxvk_unbound.cpp b/src/dxvk/dxvk_unbound.cpp
 index 63e3f4d..25e17b8 100644
 --- a/src/dxvk/dxvk_unbound.cpp
