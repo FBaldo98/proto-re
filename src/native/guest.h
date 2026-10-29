@@ -125,6 +125,16 @@ extern const char* g_data_dir;  // Android: the app's external files folder; nul
 std::string Setting(const char* key, const char* def);
 int SettingInt(const char* key, int def);
 
+// ---- device tuning (device.cpp): per-device defaults for the values below; a setting always wins ----
+struct DeviceTuning {
+    const char* tier;         // "flagship", "high", "medium", "low", or "off"
+    int render_height;        // 0 = the window size
+    int texture_skip_mips;
+    int texture_skip_min_size;
+    int fps_limit;            // 0 = no explicit cap (the swap interval paces)
+};
+const DeviceTuning& Device();
+
 // Android performance hints (perf_hint.cpp): frame budget and per-frame work for the system's CPU clocking.
 void PerfHintStart(int fps_target);
 void PerfHintAddThread(int tid);

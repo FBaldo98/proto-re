@@ -397,11 +397,11 @@ const TexAdapt* AdaptOf(void* host) {
 TexAdapt PlanTexture(UINT w, UINT h, UINT levels, DWORD usage, D3DFORMAT format) {
     if (g_skip_mips < 0) {
 #ifdef __ANDROID__
-        g_skip_mips = SettingInt("texture_skip_mips", 1);
+        g_skip_mips = SettingInt("texture_skip_mips", Device().texture_skip_mips);
 #else
         g_skip_mips = SettingInt("texture_skip_mips", 0);
 #endif
-        g_skip_min_size = UINT(SettingInt("texture_skip_min_size", 512));
+        g_skip_min_size = UINT(SettingInt("texture_skip_min_size", Device().texture_skip_min_size));
         Log("textures: skip %d mip level(s) of textures >= %u, decode DXT %s", g_skip_mips, g_skip_min_size,
             g_decode_dxt ? "on" : "off");
     }

@@ -19,13 +19,14 @@
 - на Mali системный Vulkan, на Adreno Turnip (Mesa) через libadrenotools
 - настройки в игре: разрешение рендера, текстуры, лимит FPS, экономия батареи
 - ADPF, чтобы телефон не гонял процессор на максимуме
+- ролики Bink 1 (вступление, катсцены, Web of Intrigue) декодируются через FFmpeg, звук идёт через SDL
+- автоматические профили устройства: при первом запуске качество подбирается по видеочипу и памяти
 
 Pixel 6 (Mali-G78): в меню 60 fps, в игре 38-46 в 720p и 33-42 в 1080p. Сейчас всё упирается в процессор.
 Телефон с Adreno 735: в среднем около 40 fps в 720p.
 
 ## Известные проблемы
 
-- Ролики (Bink) не проигрываются: вступительные пропускаются, воспоминания в Web of Intrigue остаются чёрными.
 - Видеокарты с драйвером только Vulkan 1.1 или 1.2 (старые Mali вроде G52/G57/G76, PowerVR, часть Adreno 6xx/7xx
   без Turnip) не потянут: графическому слою (DXVK) нужен Vulkan 1.3.
 - Adreno 8xx (Snapdragon 8 Elite и новее): родной драйвер Qualcomm не работает, игра берёт встроенный Turnip; если и
@@ -51,17 +52,35 @@ Android 10+, arm64 и купленная игра (PC, Steam app 10150, сбор
 
 | ключ | |
 |---|---|
-| `render_height` | 720, 900, 1080, 0 = экран |
+| `device_profile` | `auto` (по умолчанию), `off`, `low`, `medium`, `high`, `flagship` |
+| `render_height` | 540, 720, 900, 1080, 1440, 0 = экран |
 | `texture_skip_mips` | 0 оригинал, 1 вдвое меньше, 2 вчетверо |
-| `fps_limit` | 30 / 45 / 60 |
+| `fps_limit` | 30 / 45 / 60 / 0 = только vsync |
 | `battery_saver` | 30 fps, без привязки к большим ядрам |
 | `perf_hint` | ADPF вкл/выкл |
 | `vulkan_driver` | `auto` / `system` / `turnip` |
 | `audio_driver` | `aaudio` (по умолчанию) / `openslES`, если заикается звук |
+| `bink_audio` | звук роликов вкл/выкл |
+| `bink_swap_uv` | 1, если в роликах неправильные цвета (меняет местами плоскости цветности) |
 | `present_stats` | статистика DXVK в лог |
 | `import_profile`, `watchdog` | профилирование, отладка зависаний |
 
 Любой ключ можно задать переменной окружения `PROTORE_<KEY>`.
+
+`device_profile` задаёт значения по умолчанию для `render_height`, `texture_skip_mips` и `fps_limit`; явно заданный
+ключ важнее. `auto` смотрит модель GPU (`Adreno840v2` на Oppo Find N6) и объём памяти:
+
+| профиль | устройства | рендер | мипы | fps |
+|---|---|---|---|---|
+| flagship | Adreno 8xx, 8 ГиБ+ (Snapdragon 8 Elite и новее, например Find N6) | 1080 | 0 | 60 |
+| high | Adreno 740+, Mali-G8x/Xclipse, 8 ГиБ+ | 900 | 1 | 60 |
+| medium | остальные Adreno 6xx/7xx (710–735), Mali-G7x, 6 ГиБ+ | 720 | 1 | 0 (vsync) |
+| low | 4 ГиБ и меньше | 540 | 1 | 0 (vsync) |
+
+На Find N6 (Snapdragon 8 Elite Gen 5, Adreno 840, 16 ГиБ) включается профиль `flagship`: 1080p, текстуры в полном
+разрешении и лимит 60 fps. Лимит не даёт процессору работать на максимуме на 120-герцовом экране; `fps_limit = 0`
+его снимает, а `render_height = 1440` делает картинку резче (дороже для GPU). Тактовые частоты по-прежнему
+регулирует ADPF, поэтому при запасе времени телефон сбрасывает частоты.
 
 Драйверы на Adreno: игра пробует Turnip 26.2, потом Turnip 26.3 (для Adreno 710/720), потом драйвер телефона (нужен
 Vulkan 1.3). На Adreno 8xx первым пробуется Turnip 26.3. Чтобы использовать свой драйвер (`.so` Vulkan-драйвера для Adreno,
@@ -100,6 +119,7 @@ tools/cool_make.sh -C src/native PLATFORM=android ABI=arm64-v8a ARM_ARCH=armv8-a
 android/build-apk.sh arm64-v8a
 ```
 
+`android/build-deps.sh` собирает SDL2, FAudio, DXVK и статический FFmpeg (демуксер bink и декодеры bink/binkaudio).
 `cool_make.sh` это make на всех ядрах, который ставит сборку на паузу при 93°C.
 
 ## Тестирование

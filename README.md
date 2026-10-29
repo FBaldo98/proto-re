@@ -19,13 +19,14 @@ Runs on the phone: menus, sound, missions, saves. A full playthrough is not test
 - Mali uses the system Vulkan driver, Adreno uses Turnip (Mesa) through libadrenotools
 - settings in game: render resolution, textures, FPS limit, battery saver
 - ADPF hints so the phone doesn't run the CPU at max all the time
+- Bink 1 movies (intro, cutscenes, Web of Intrigue) decode with FFmpeg; the sound goes through SDL
+- automatic device profiles: the first start picks quality defaults from the GPU and RAM
 
 Pixel 6 (Mali-G78): menus 60 fps, gameplay 38-46 at 720p and 33-42 at 1080p. Gameplay is CPU bound right now.
 A phone with Adreno 735: about 40 fps on average at 720p.
 
 ## Known issues
 
-- Videos (Bink) don't play: intro movies are skipped and Web of Intrigue memories stay black.
 - GPUs whose driver only has Vulkan 1.1 or 1.2 (older Mali like G52/G57/G76, PowerVR, some Adreno 6xx/7xx without
   Turnip) can't run it: the graphics layer (DXVK) needs Vulkan 1.3.
 - Adreno 8xx (Snapdragon 8 Elite and newer): Qualcomm's own driver fails, the game uses the bundled Turnip; if that
@@ -51,17 +52,35 @@ Logs go to the same folder (`proto-native.log`, `app_process64_d3d9.log`) and to
 
 | key | |
 |---|---|
-| `render_height` | 720, 900, 1080, 0 = screen |
+| `device_profile` | `auto` (default), `off`, `low`, `medium`, `high`, `flagship` |
+| `render_height` | 540, 720, 900, 1080, 1440, 0 = screen |
 | `texture_skip_mips` | 0 original, 1 half, 2 quarter |
-| `fps_limit` | 30 / 45 / 60 |
+| `fps_limit` | 30 / 45 / 60 / 0 = vsync only |
 | `battery_saver` | 30 fps, no big core pinning |
 | `perf_hint` | ADPF on/off |
 | `vulkan_driver` | `auto` / `system` / `turnip` |
 | `audio_driver` | `aaudio` (default) / `openslES`, try it if the sound stutters |
+| `bink_audio` | movie sound on/off |
+| `bink_swap_uv` | 1 if movie colours look wrong (swaps the chroma planes) |
 | `present_stats` | DXVK stats in the log |
 | `import_profile`, `watchdog` | profiling, hang diagnostics |
 
 Every key also works as an env var `PROTORE_<KEY>`.
+
+`device_profile` sets the defaults of `render_height`, `texture_skip_mips` and `fps_limit`; any key set explicitly
+wins. `auto` reads the GPU model (`Adreno840v2` on the Oppo Find N6) and the RAM:
+
+| profile | devices | render | mip skip | fps |
+|---|---|---|---|---|
+| flagship | Adreno 8xx, 8 GiB+ (Snapdragon 8 Elite and newer, e.g. Find N6) | 1080 | 0 | 60 |
+| high | Adreno 740+, Mali-G8x/Xclipse, 8 GiB+ | 900 | 1 | 60 |
+| medium | other Adreno 6xx/7xx (710-735), Mali-G7x, 6 GiB+ | 720 | 1 | 0 (vsync) |
+| low | 4 GiB or less | 540 | 1 | 0 (vsync) |
+
+On the Find N6 (Snapdragon 8 Elite Gen 5, Adreno 840, 16 GiB) the profile is `flagship`: 1080p internal resolution,
+full-resolution textures and a 60 fps cap. The 60 fps cap keeps the 120 Hz panel from running the CPU at full tilt;
+`fps_limit = 0` removes it, and `render_height = 1440` sharpens the upscaled picture at some GPU cost. The clock
+and power hints still go through ADPF, so the phone drops its clocks when a frame has headroom.
 
 GPU drivers on Adreno: the game tries Turnip 26.2, then Turnip 26.3 (for Adreno 710/720), then the phone's own driver
 (needs Vulkan 1.3). On Adreno 8xx it tries Turnip 26.3 first. To use your own driver (an Adreno Vulkan driver `.so`,
@@ -100,7 +119,8 @@ tools/cool_make.sh -C src/native PLATFORM=android ABI=arm64-v8a ARM_ARCH=armv8-a
 android/build-apk.sh arm64-v8a
 ```
 
-`cool_make.sh` is make on all cores that pauses at 93°C.
+`android/build-deps.sh` builds SDL2, FAudio, DXVK and a static FFmpeg (the Bink demuxer and the bink/binkaudio
+decoders). `cool_make.sh` is make on all cores that pauses at 93°C.
 
 ## Testing
 

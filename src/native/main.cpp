@@ -405,7 +405,7 @@ int main(int argc, char** argv) {
     static std::atomic<uint64_t> frames{0};
     StartWatchdog(&frames);
     PinToBigCores();
-    int fps_limit = SettingInt("fps_limit", 0);
+    int fps_limit = SettingInt("fps_limit", Device().fps_limit);
     if (SettingInt("battery_saver", 0) && (fps_limit == 0 || fps_limit > 30)) fps_limit = 30;
     g_fps_limit.store(fps_limit);
     PerfHintStart(fps_limit);

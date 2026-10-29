@@ -2,18 +2,44 @@
 # (Android: /sdcard/Android/data/com.protore.game/files/protore.ini; desktop: the working directory).
 # Any key can also be set as an environment variable PROTORE_<KEY>, e.g. PROTORE_RENDER_HEIGHT=540.
 
+# Device profile: auto (default), off, low, medium, high or flagship. The profile sets the defaults of
+# render_height, texture_skip_mips and fps_limit from the GPU and RAM; a key set explicitly below still wins.
+# auto: Adreno 8xx flagships (e.g. Snapdragon 8 Elite Gen 5 / Find N6) get 1080p, full textures and 60 fps;
+# Adreno 740+ gets 900p; older GPUs 720p or 540p. `off` keeps the old defaults (720p, one mip level, no cap).
+#device_profile = auto
+
 # Render resolution height; the width follows the screen's aspect ratio and the frame is scaled to the screen.
-# 0 = the full window size. Android default 720 (540 for weak GPUs, 900/1080 for flagships).
-render_height = 720
+# 0 = the full window size. On the Find N6 the profile picks 1080; 1440 sharpens the upscaled picture, 720
+# gives the CPU more headroom.
+#render_height = 1080
 
 # Texture quality: number of top mip levels dropped from large mipmapped textures (>= texture_skip_min_size).
-# 0 = original, 1 = half resolution (a quarter of the memory), 2 = quarter resolution. Android default 1.
-texture_skip_mips = 1
-texture_skip_min_size = 512
+# 0 = original, 1 = half resolution (a quarter of the memory), 2 = quarter resolution. Profiles use 0 on
+# flagships and 1 elsewhere.
+#texture_skip_mips = 0
+#texture_skip_min_size = 512
+
+# Frame rate limit: 30, 45, 60, 0 = no explicit cap (the display's vsync paces). The profile uses 60 on
+# flagships, 0 elsewhere; battery_saver forces 30.
+#fps_limit = 60
+
+# Battery saver: 30 fps and the scheduler picks the cores instead of pinning the engine to the big ones.
+#battery_saver = 0
+
+# ADPF (Android 13+): report each frame's work time so the system clocks the CPU for the frame budget.
+#perf_hint = 1
 
 # Decode DXT (BC1-3) textures on the CPU. Needed on GPUs without BC formats (Mali, PowerVR) and detected
 # automatically; 1/0 forces it on/off.
 #decode_dxt = 1
 
+# Vulkan driver on Adreno: auto (Turnip first), system, or turnip.
+#vulkan_driver = auto
+
 # Audio backend: aaudio (default) or openslES. Try openslES if the sound stutters while the game runs smoothly.
 #audio_driver = openslES
+
+# Bink movies (intro, cutscenes, Web of Intrigue): audio on/off. The video is decoded by FFmpeg.
+#bink_audio = 1
+# Set to 1 if movie colours look wrong (the chroma planes are guessed as Bink cR = Cr, cB = Cb).
+#bink_swap_uv = 0

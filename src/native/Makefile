@@ -15,9 +15,12 @@ COMMON_FLAGS := -DRECOMP_FLAT_MEMORY -DRECOMP_GUEST_BASE=0x1000000000ull -fsigne
 RECOMP_OPT ?= -O1
 RECOMP_CFLAGS = -std=c11 $(RECOMP_OPT) $(RECOMP_EXTRA) -g0 -fno-strict-aliasing -fwrapv -fno-delete-null-pointer-checks -w $(COMMON_FLAGS) \
                 $(TARGET_FLAGS)
+# Bink movies are decoded with FFmpeg's bink demuxer and bink/binkaudio decoders. android/build-deps.sh installs a
+# static FFmpeg into the deps prefix; without it the movies are skipped as before (bink.cpp falls back to the stub).
+BINK_FFMPEG :=
 CXXFLAGS = -std=c++17 -O2 -g -Wall -Wextra -Wno-unused-parameter $(COMMON_FLAGS) $(TARGET_FLAGS) \
            -I$(DXVK)/include/native/directx -I$(DXVK)/include/native/windows -I$(DXVK)/include/native/wsi \
-           $(DEP_INCLUDES)
+           $(DEP_INCLUDES) $(if $(BINK_FFMPEG),-DPROTORE_FFMPEG=1)
 
 ifeq ($(PLATFORM),android)
 ABI ?= arm64-v8a
@@ -39,6 +42,10 @@ TSO ?= 1
 RECOMP_EXTRA := $(if $(filter 1,$(TSO)),-DRECOMP_TSO)
 DEP_INCLUDES := -I$(DEPS)/include
 LDFLAGS := -shared -Wl,-Bsymbolic -static-libstdc++ -Wl,--no-undefined -L$(DEPS)/lib -ldxvk_d3d9 -lFAudio -lSDL2 -llog -landroid
+ifneq ($(wildcard $(DEPS)/lib/libavformat.a),)
+BINK_FFMPEG := 1
+LDFLAGS += -lavformat -lavcodec -lswresample -lavutil -lm
+endif
 # Adreno: Turnip and libadrenotools from android/build-turnip.sh (arm64 only; built without them otherwise).
 TURNIP ?= $(HOME)/proto-re-data/android-turnip
 ifneq ($(and $(filter arm64-v8a,$(ABI)),$(wildcard $(TURNIP)/lib/libadrenotools.a)),)
@@ -57,16 +64,23 @@ OUT ?= ../../build/native
 DXVK_LIB ?= $(DXVK)/build-native/src/d3d9
 FAUDIO ?= $(HOME)/proto-re-data/deps/FAudio
 FAUDIO_LIB ?= $(FAUDIO)/build-native
+# Optional on the desktop: a static FFmpeg with the bink demuxer (see android/build-deps.sh for the Android build).
+FFMPEG ?= $(HOME)/proto-re-data/deps/ffmpeg
 TARGET_FLAGS :=
 DEP_INCLUDES := -I$(FAUDIO)/include
 LDFLAGS := -pthread -L$(DXVK_LIB) -Wl,-rpath,$(DXVK_LIB) -ldxvk_d3d9 -L$(FAUDIO_LIB) -Wl,-rpath,$(FAUDIO_LIB) -lFAudio \
            -lSDL2
+ifneq ($(wildcard $(FFMPEG)/include/libavformat/avformat.h),)
+BINK_FFMPEG := 1
+DEP_INCLUDES += -I$(FFMPEG)/include
+LDFLAGS += -L$(FFMPEG)/lib -lavformat -lavcodec -lswresample -lavutil -lm
+endif
 BINARY := proto-native
 endif
 
 SRCS := main.cpp memory.cpp loader.cpp imports.cpp runtime.cpp thread.cpp kernel32.cpp msvcr80.cpp user32.cpp \
         advapi32.cpp misc.cpp d3d9.cpp input.cpp xaudio2.cpp bink.cpp dinput.cpp gamepad.cpp config.cpp watchdog.cpp hot_audio.cpp hot_skin.cpp \
-        vulkan_driver.cpp perf_hint.cpp
+        vulkan_driver.cpp perf_hint.cpp device.cpp
 GEN := $(wildcard $(RECOMP_DIR)/*.c)
 OBJS = $(SRCS:%.cpp=$(OUT)/%.o) $(GEN:$(RECOMP_DIR)/%.c=$(OUT)/gen/%.o)
 

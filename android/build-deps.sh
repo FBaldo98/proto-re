@@ -16,6 +16,8 @@ JOBS=${JOBS:-$(nproc)}
 SDL2_TAG=release-2.30.9
 FAUDIO_TAG=25.10
 DXVK_TAG=v2.5.3
+# Bink movies (src/native/bink.cpp): the bink demuxer and the bink/binkaudio decoders only.
+FFMPEG_TAG=n7.1.1
 
 case $ABI in
     arm64-v8a) TRIPLE=aarch64-linux-android; CPU_FAMILY=aarch64; CPU=armv8-a ;;
@@ -30,6 +32,8 @@ mkdir -p "$SRC" "$PREFIX"
 fetch SDL2 https://github.com/libsdl-org/SDL.git $SDL2_TAG
 fetch FAudio https://github.com/FNA-XNA/FAudio.git $FAUDIO_TAG
 fetch dxvk https://github.com/doitsujin/dxvk.git $DXVK_TAG
+# FFmpeg has no out-of-tree build; one source tree per ABI so two ABI builds can share the cache directory.
+fetch ffmpeg-$ABI https://github.com/FFmpeg/FFmpeg.git $FFMPEG_TAG
 
 # Android patches (android/patches/<project>-*.patch), applied once.
 for proj in SDL2 FAudio dxvk; do
@@ -54,8 +58,29 @@ cmake -S "$SRC/FAudio" -B "$SRC/build/FAudio-$ABI" "${CMAKE_ANDROID[@]}" -DBUILD
 cmake --build "$SRC/build/FAudio-$ABI" -j "$JOBS"
 cmake --install "$SRC/build/FAudio-$ABI"
 
-# DXVK native, d3d9 only.
+# FFmpeg, static: only the Bink container and its video/audio decoders (the game stores .bik movies in its .rcf
+# archives; src/native/bink.cpp feeds them to it through the engine's file system).
 TC=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin
+SYSROOT=$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot
+case $ABI in
+    arm64-v8a) FF_ARCH=aarch64; FF_CPU=armv8-a ;;
+    x86_64) FF_ARCH=x86_64; FF_CPU=x86_64 ;;
+esac
+(
+    cd "$SRC/ffmpeg-$ABI"
+    ./configure --prefix="$PREFIX" --target-os=android --enable-cross-compile --arch="$FF_ARCH" --cpu="$FF_CPU" \
+        --cc="$TC/$TRIPLE$API-clang" --cxx="$TC/$TRIPLE$API-clang++" --ar="$TC/llvm-ar" \
+        --ranlib="$TC/llvm-ranlib" --strip="$TC/llvm-strip" --nm="$TC/llvm-nm" --sysroot="$SYSROOT" \
+        --enable-static --disable-shared --enable-pic --disable-symver --disable-x86asm \
+        --disable-programs --disable-doc --disable-network --disable-autodetect --disable-everything \
+        --disable-avdevice --disable-avfilter --disable-swscale --disable-postproc \
+        --enable-avcodec --enable-avformat --enable-avutil --enable-swresample \
+        --enable-demuxer=bink --enable-decoder=bink,binkaudio_dct,binkaudio_rdft
+    make -j "$JOBS"
+    make install
+)
+
+# DXVK native, d3d9 only.
 CROSS=$SRC/build/android-$ABI.cross
 cat > "$CROSS" <<EOF
 [binaries]

@@ -1,5 +1,5 @@
-# Third-party native libraries of the Android port (SDL2, FAudio, DXVK d3d9; Turnip and libadrenotools for
-# Adreno), built on GitHub's runners.
+# Third-party native libraries of the Android port (SDL2, FAudio, DXVK d3d9, a static FFmpeg for Bink movies;
+# Turnip and libadrenotools for Adreno), built on GitHub's runners.
 # Nothing here touches game files or code generated from them: the recompiled engine is built locally only.
 name: android-deps
 
@@ -45,6 +45,7 @@ jobs:
           name: android-deps-${{ matrix.abi }}
           path: |
             out/${{ matrix.abi }}/lib/*.so
+            out/${{ matrix.abi }}/lib/*.a
             out/${{ matrix.abi }}/include
           retention-days: 30
 

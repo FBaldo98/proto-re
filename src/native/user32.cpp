@@ -137,7 +137,7 @@ uint32_t HostWindow() { return kMainWindow; }
 // the window when presenting.
 void InitClientSize(int window_w, int window_h) {
 #ifdef __ANDROID__
-    int rh = SettingInt("render_height", 720);
+    int rh = SettingInt("render_height", Device().render_height);
 #else
     int rh = SettingInt("render_height", 0);
 #endif
