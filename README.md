@@ -39,7 +39,7 @@ Android 10+, arm64, and a bought copy of the game (PC, Steam app 10150, build 19
 
 1. Install `prototype.apk` and start it. Without the game files it shows where to put them and creates the folder.
 2. Copy `prototypeenginef.dll`, `proto_uv.dat`, all `.rcf` and `.p3d` files and the `art`, `audio`, `scripts`
-   folders (the game closes right after starting without `proto_uv.dat`) to either
+   folders with their contents (the game closes right after starting without `proto_uv.dat`) to either
    `/sdcard/Android/data/com.protore.game/files/game/` (file managers often can't open it on Android 11+, copy from a
    PC over USB) or `/sdcard/Prototype/` (any file manager; tap "Allow file access" on the setup screen).
    For Russian, use the `.rcf` files with the translation applied.
@@ -85,7 +85,9 @@ and power hints still go through ADPF, so the phone drops its clocks when a fram
 GPU drivers on Adreno: the game tries Turnip 26.2, then Turnip 26.3 (for Adreno 710/720), then the phone's own driver
 (needs Vulkan 1.3). On Adreno 8xx it tries Turnip 26.3 first. To use your own driver (an Adreno Vulkan driver `.so`,
 for example a Turnip build made for emulators), put it in `Android/data/com.protore.game/files/driver/`; the game
-tries it first. Delete it from there to go back.
+tries it first. Delete it from there to go back. On Android 16 with Adreno 840, a Turnip Gen8 V37 (Mesa 26.3.0-R6)
+build from [StevenMXZ/Adreno-Tools-Drivers](https://github.com/StevenMXZ/Adreno-Tools-Drivers) in `files/driver/` was
+verified; Turnip 27.0.0 builds rendered vertical-line artifacts there.
 
 ## Reporting a problem
 
@@ -104,9 +106,9 @@ version, the version of the APK and when the problem happens (at start, in the m
 
 ## Building
 
-Linux with the Android NDK, JDK, SDK build-tools, python3 with `capstone` and `pefile`, cmake, ninja and
-meson >= 1.4 (Turnip also needs mako, pyyaml, bison, flex, glslangValidator). `PROTORE_ENGINE` points to the
-original DLL (default `~/Downloads/Prototype (2009)/Prototype/prototypeenginef.dll`).
+Linux (or Windows, see below) with the Android NDK, JDK, SDK build-tools, python3 with `capstone` and `pefile`,
+cmake, ninja and meson >= 1.4 (Turnip also needs mako, pyyaml, bison, flex, glslangValidator). `PROTORE_ENGINE`
+points to the original DLL (default `~/Downloads/Prototype (2009)/Prototype/prototypeenginef.dll`).
 
 ```sh
 android/build-deps.sh arm64-v8a ~/proto-re-data/android-deps-src ~/proto-re-data/android-deps/arm64-v8a
@@ -121,6 +123,22 @@ android/build-apk.sh arm64-v8a
 
 `android/build-deps.sh` builds SDL2, FAudio, DXVK and a static FFmpeg (the Bink demuxer and the bink/binkaudio
 decoders). `cool_make.sh` is make on all cores that pauses at 93°C.
+
+### Windows
+
+The build also works on Windows without WSL. Use Git Bash as the shell (it provides `sh`, `touch`, `zip` and
+`realpath`), the Windows NDK 28.2.13676358, JDK, SDK build-tools, CMake, Ninja, Meson >= 1.4, a native gcc for
+FFmpeg's host tools, and `bison`/`flex` for Turnip.
+
+- Point the DXVK/Turnip Meson cross files at `clang.exe`/`clang++.exe` with `--target=aarch64-linux-android26`
+  (29 for Turnip) and `--sysroot=...`. Meson on Windows cannot execute the NDK's extensionless wrapper scripts.
+- Build `src/native` with `TOOLCHAIN=.../toolchains/llvm/prebuilt/windows-x86_64/bin` and `DEPS`, `DXVK`, `TURNIP`
+  set. If the final link exceeds the Windows command-line limit, pass the object list through a response file
+  (`@objs.rsp`).
+- `android/build-apk.sh` assumes Linux tool paths; use the Windows `llvm-strip.exe`, `d8.bat` and `apksigner.bat`
+  (or run the equivalent `aapt2`/`d8`/`zipalign`/`apksigner` steps directly).
+
+This was verified on a Snapdragon 8 Elite Gen 5 / Adreno 840 phone running Android 16.
 
 ## Testing
 

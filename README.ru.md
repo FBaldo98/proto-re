@@ -39,7 +39,7 @@ Android 10+, arm64 и купленная игра (PC, Steam app 10150, сбор
 
 1. Поставить `prototype.apk` и запустить. Без файлов игры он покажет, куда их класть, и сам создаст папку.
 2. Скопировать `prototypeenginef.dll`, `proto_uv.dat`, все `.rcf` и `.p3d` и папки `art`, `audio`, `scripts`
-   (без `proto_uv.dat` игра закрывается сразу после запуска) либо в
+   со всем содержимым (без `proto_uv.dat` игра закрывается сразу после запуска) либо в
    `/sdcard/Android/data/com.protore.game/files/game/` (на Android 11+ файловые менеджеры туда обычно не пускают,
    проще скопировать с ПК по USB), либо в `/sdcard/Prototype/` (любой файловый менеджер; на экране запуска нажать
    "Allow file access"). Для русского нужны `.rcf` с наложенным переводом.
@@ -85,7 +85,10 @@ Android 10+, arm64 и купленная игра (PC, Steam app 10150, сбор
 Драйверы на Adreno: игра пробует Turnip 26.2, потом Turnip 26.3 (для Adreno 710/720), потом драйвер телефона (нужен
 Vulkan 1.3). На Adreno 8xx первым пробуется Turnip 26.3. Чтобы использовать свой драйвер (`.so` Vulkan-драйвера для Adreno,
 например сборку Turnip для эмуляторов), положите его в `Android/data/com.protore.game/files/driver/`, игра попробует
-его первым. Удалите оттуда, чтобы вернуть как было.
+его первым. Удалите оттуда, чтобы вернуть как было. На Android 16 с Adreno 840 проверена сборка Turnip Gen8 V37
+(Mesa 26.3.0-R6) из
+[StevenMXZ/Adreno-Tools-Drivers](https://github.com/StevenMXZ/Adreno-Tools-Drivers) в `files/driver/`;
+сборки Turnip 27.0.0 давали вертикальные полосы.
 
 ## Если что-то не работает
 
@@ -104,8 +107,9 @@ Vulkan 1.3). На Adreno 8xx первым пробуется Turnip 26.3. Что
 
 ## Сборка
 
-Linux, Android NDK, JDK, SDK build-tools, python3 с `capstone` и `pefile`, cmake, ninja и meson >= 1.4 (для Turnip
-ещё mako, pyyaml, bison, flex, glslangValidator). `PROTORE_ENGINE` указывает на оригинальный DLL
+Linux (или Windows, см. ниже), Android NDK, JDK, SDK build-tools, python3 с `capstone` и `pefile`, cmake, ninja
+и meson >= 1.4 (для Turnip ещё mako, pyyaml, bison, flex, glslangValidator). `PROTORE_ENGINE` указывает на
+оригинальный DLL
 (по умолчанию `~/Downloads/Prototype (2009)/Prototype/prototypeenginef.dll`).
 
 ```sh
@@ -121,6 +125,22 @@ android/build-apk.sh arm64-v8a
 
 `android/build-deps.sh` собирает SDL2, FAudio, DXVK и статический FFmpeg (демуксер bink и декодеры bink/binkaudio).
 `cool_make.sh` это make на всех ядрах, который ставит сборку на паузу при 93°C.
+
+### Windows
+
+Сборка работает и на Windows без WSL. Нужны Git Bash (в нём есть `sh`, `touch`, `zip` и `realpath`), Windows NDK
+28.2.13676358, JDK, SDK build-tools, CMake, Ninja, Meson >= 1.4, нативный gcc для host-утилит FFmpeg и
+`bison`/`flex` для Turnip.
+
+- В cross-файлах Meson для DXVK/Turnip укажите `clang.exe`/`clang++.exe` с `--target=aarch64-linux-android26`
+  (29 для Turnip) и `--sysroot=...`: Meson на Windows не может запускать скрипты-обёртки NDK без расширения.
+- `src/native` собирайте с `TOOLCHAIN=.../toolchains/llvm/prebuilt/windows-x86_64/bin` и переменными `DEPS`,
+  `DXVK`, `TURNIP`. Если итоговая команда линковки длиннее лимита Windows, передайте список объектов через
+  response-файл (`@objs.rsp`).
+- `android/build-apk.sh` рассчитан на Linux-пути; используйте Windows-версии `llvm-strip.exe`, `d8.bat` и
+  `apksigner.bat` (или выполните шаги `aapt2`/`d8`/`zipalign`/`apksigner` вручную).
+
+Проверено на телефоне Snapdragon 8 Elite Gen 5 / Adreno 840 под Android 16.
 
 ## Тестирование
 
