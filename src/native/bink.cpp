@@ -29,6 +29,7 @@ extern "C" {
 #include <libavformat/avformat.h>
 #include <libavutil/channel_layout.h>
 #include <libavutil/opt.h>
+#include <libavutil/pixdesc.h>
 #include <libswresample/swresample.h>
 }
 #include <SDL2/SDL.h>
@@ -260,6 +261,7 @@ struct Bink {
     bool paused = false;
     bool sound_on = true, video_on = true;
     bool have_alpha = false;
+    bool logged_frame = false;
     uint32_t open_flags = 0;
 
     std::chrono::steady_clock::time_point opened;
@@ -511,12 +513,23 @@ void CopyFrame(Bink* b) {
         }
         CopyPlane(b->frame, plane, p.buffer, p.pitch, pw, ph);
     };
+    if (!b->logged_frame) {
+        b->logged_frame = true;
+        const char* format = av_get_pix_fmt_name(AVPixelFormat(b->frame->format));
+        Log("bink: frame %dx%d %s, alpha data %s, A %08x pitch %u", w, h, format ? format : "?",
+            b->frame->data[3] ? "yes" : "no", set.a.buffer, set.a.pitch);
+    }
     copy(set.y, 0, w, h, uint32_t(w));
     const bool swap = SettingInt("bink_swap_uv", 0) != 0;
     // Bink names its chroma planes after the colour they carry: cR = Cr (V, FFmpeg plane 2), cB = Cb (U, plane 1).
     copy(set.cr, swap ? 1 : 2, cw, ch, uint32_t(cw));
     copy(set.cb, swap ? 2 : 1, cw, ch, uint32_t(cw));
-    if (b->frame->data[3] && set.a.buffer) CopyPlane(b->frame, 3, set.a.buffer, set.a.pitch, w, h);
+    // The engine asks for an alpha plane (BINKALPHA) even when the file has no alpha channel; FFmpeg only fills
+    // data[3] for files that do. Leave the plane opaque in that case, otherwise the movie renders fully transparent.
+    if (b->have_alpha && set.a.buffer && set.a.pitch) {
+        if (b->frame->data[3]) CopyPlane(b->frame, 3, set.a.buffer, set.a.pitch, w, h);
+        else memset(Ptr<uint8_t>(set.a.buffer), 0xFF, size_t(set.a.pitch) * size_t(h));
+    }
 
     // The engine uses its own texture sizes; keep the Bink view of the current frame in step.
     if (BinkFrameBuffers* guest = Ptr<BinkFrameBuffers>(b->frame_buffers)) guest->frame_num = uint32_t(index);
